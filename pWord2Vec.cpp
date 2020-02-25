@@ -1098,7 +1098,7 @@ void VectorAddBW(real matrix0[], int col0, real vector1[], int matrix0_start, re
 }
 void VectorMul(real matrix0[], int col0, real scale, int matrix0_start){
     for(int i = 0;i < col0;i++){
-        matrix0[matrix0_start*(col0)+i] *= scale;
+        matrix0[matrix0_start*col0+i] *= scale;
     }
 }
 void VectorMul(real vector0[], int col0, real matrix1[], int matrix0_start){
@@ -1245,6 +1245,8 @@ void Train_CBOWBasedNS() {
             int b = next_random % window;
 
             int num_inputs = 0;
+            cw = 0;
+            char_list_cnt = 0;
             for (int i = b; i < 2 * window + 1 - b; i++) {
                 if (i != window) {
                     int c = sentence_position - window + i;
@@ -1303,7 +1305,9 @@ void Train_CBOWBasedNS() {
                     if(cwe_type==0)
                         VectorAdd(cbowM,hidden_size,inputM,j,1.0f);
                     if(cwe_type==1){
+                        last_word = inputs[j];
                         for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                        VectorAdd(neu1char,hidden_size,Wih,last_word,1.0f);
                         if (cwe_type && vocab[last_word].character_size) {
                             for (c = 0; c < vocab[last_word].character_size; c++) {
                                 charv_id = vocab[last_word].character[c];
@@ -1311,8 +1315,10 @@ void Train_CBOWBasedNS() {
                                 charv_id_list[char_list_cnt] = charv_id;
                                 char_list_cnt++;
                             }
+                            VectorMul(neu1char,hidden_size,0.5f,0);
                         }
-                        VectorAdd(cbowM,hidden_size,inputM,j,1.0f);
+
+                        VectorAdd(cbowM,hidden_size,neu1char,0,1.0f);
                     }
 
                 }
@@ -1353,8 +1359,14 @@ void Train_CBOWBasedNS() {
                 for (int i = 0; i < input_size; i++) {
 //                    int src = i * hidden_size;
 //                    int des = inputs[input_start + i] * hidden_size;
-
-                    VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
+                    if(cwe_type==0)
+                        VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
+                    if(cwe_type==1){
+                        VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
+                        for(int j = 0;j<vocab[inputs[i]].character_size;j++){
+                            VectorAddBW(charv,hidden_size,cbowM,vocab[inputs[i]].character[j],1.0f);
+                        }
+                    }
                 }
 
                 for (int i = 0; i < output_size; i++) {
@@ -1703,17 +1715,8 @@ void Train_CWENS() {
                 }
 #else
                 //inputM -> Min
-                for (int i = 0; i < input_size; i++) {
-                    for (int j = 0; j < hidden_size; j++) {
-                        real f = 0.f;
-                        #pragma simd
-                        for (int k = 0; k < output_size; k++) {
-                            f += corrM[k] * outputM[k * hidden_size + j];
-                        }
-//                        inputM[i * hidden_size + j] = f / input_size;
-                        inputM[i * hidden_size + j] = f;
-                    }
-                }
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, 1, hidden_size, output_size, 1.0f, corrM,
+                        1, outputM, hidden_size, 0.0f, cbowM, hidden_size);
 #endif
                 // subnet update
                 for (int i = 0; i < input_size; i++) {
@@ -1721,7 +1724,7 @@ void Train_CWENS() {
                     int des = inputs[input_start + i] * hidden_size;
                     #pragma simd
                     for (int j = 0; j < hidden_size; j++) {
-                        Wih[des + j] += inputM[src + j];
+                        Wih[des + j] += cbowM[j];
                     }
 //                    last_word = inputs[j];
 
@@ -1733,7 +1736,7 @@ void Train_CWENS() {
 //                    charv_id = charv_id_list[inputs[c]];
                     for(int i = 0;i<vocab[inputs[c]].character_size;i++){
                         for (d = 0; d < hidden_size; d++)
-                            charv[d + vocab[inputs[c]].character[i] * hidden_size] += inputM[c*hidden_size+d];
+                            charv[d + vocab[inputs[c]].character[i] * hidden_size] += cbowM[d];
                     }
 //
 //                    charv_id = vocab[inputs[c]].cha
@@ -2654,16 +2657,17 @@ int main(int argc, char **argv) {
     printf("stream from disk: %d\n", disk);
     printf("starting training using file: %s\n\n", train_file);
 
-    if(cwe_type==0 && cbow_type == 1) {
+    if((cwe_type==0||cwe_type==1) && cbow_type == 1) {
         printf("model: CBOWNS\n");
+        character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         Train_CBOWBasedNS();
     }else if(cwe_type==0 && cbow_type == 0){
         printf("model: SGNS\n");
         Train_SGNS();
-    }else if(cwe_type==1 && cbow_type ==1){
-        character_size = (MAX_CHINESE - MIN_CHINESE + 1);
-        printf("model: CWENS\n");
-        Train_CWENS();
+//    }else if(cwe_type==1 && cbow_type ==1){
+//        character_size = (MAX_CHINESE - MIN_CHINESE + 1);
+//        printf("model: CWENS\n");
+//        Train_CWENS();
     }else if(cwe_type==1 && cbow_type ==0){
         character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         printf("model: CWECBOWNS\n");
