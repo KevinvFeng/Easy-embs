@@ -93,10 +93,12 @@ char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 const int table_size = 1e8;
 int cwe_type = 0;
+int cbow_type = 0;
 struct vocab_word *vocab = NULL;
 int *vocab_hash = NULL;
 int *table = NULL;
 real *Wih = NULL, *Woh = NULL, *expTable = NULL;
+real *WeightH = NULL;
 real *charv;
 long long character_size = 0;
 void InitUnigramTable() {
@@ -410,7 +412,8 @@ void InitNet() {
 
     Wih = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
     Woh = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
-    if (!Wih || !Woh) {
+    WeightH = (real *) _mm_malloc(vocab_size * sizeof(real),64);
+    if (!Wih || !Woh || !WeightH) {
         printf("Memory allocation failed\n");
         exit(1);
     }
@@ -428,7 +431,7 @@ void InitNet() {
         Wih[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
     }
 
-    if (cwe_type) {
+    if (cwe_type==1) {
         printf("char!\ncharactersize: %lld\n",character_size);
         a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
         if (charv == NULL) {printf("Memory allocation failed\n"); exit(1);}
@@ -436,6 +439,21 @@ void InitNet() {
             next_random = next_random * (unsigned long long)25214903917 + 11;
             charv[a] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / hidden_size;
         }
+    }else if(cwe_type==2){
+        a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
+        if (charv == NULL) {printf("Memory allocation failed\n"); exit(1);}
+        for (a = 0; a < (long long)character_size * hidden_size; a++) {
+            next_random = next_random * (unsigned long long)25214903917 + 11;
+            charv[a] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / hidden_size;
+        }
+        #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
+        for (int i = 0; i < vocab_size; i++) {
+            memset(WeightH + i , 0.5f,  sizeof(real));
+        }
+        for (int i = 0; i < vocab_size; i++) {
+            WeightH[i] = 0.5f;
+        }
+        printf("initNet()\n");
     }
 
 }
@@ -978,22 +996,20 @@ void Train_CBOWNS() {
                 // hidden_size -> D
                 // f -> inn
                 // g -> err*alpha
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, 1, hidden_size, 1.0f, outputM,
+                        hidden_size, cbowM, hidden_size, 0.0f, corrM, 1);
                 for (int i = 0; i < output_size; i++) {
                     int c = outputs.meta[i];
-
-                    real f = 0.f, g;
-                    #pragma simd
-                    for (int k = 0; k < hidden_size; k++) {
-                        f += outputM[i * hidden_size + k] * cbowM[k];
-                    }
+                    real f = corrM[i];
                     int label = (i ? 0 : 1);
                     if (f > MAX_EXP)
-                        g = (label - 1) * alpha;
+                        f = (label - 1) * alpha;
                     else if (f < -MAX_EXP)
-                        g = label * alpha;
+                        f = label * alpha;
                     else
-                        g = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
-                    corrM[i] = g * c;
+                        f = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                    corrM[i] = f * c;
+
                 }
 #endif
 #ifndef USE_MKL
@@ -1006,39 +1022,25 @@ void Train_CBOWNS() {
                     }
                 }
 #else
-                for (int i = 0; i < output_size; i++) {
-                    for (int j = 0; j < hidden_size; j++) {
-                        real f = 0.f;
-                        f += corrM[i] * cbowM[j];
-                        outputMd[i * hidden_size + j] = f;
-                    }
-                }
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, 1, 1.0f, corrM,
+                        1, cbowM, hidden_size, 0.0f, outputMd, hidden_size);
 #endif
 #ifndef USE_MKL
                 printf("use mkl\n");
             //inputM -> Min
-                for (int i = 0; i < input_size; i++) {
-                    for (int j = 0; j < hidden_size; j++) {
-                        real f = 0.f;
-                        #pragma simd
-                        for (int k = 0; k < output_size; k++) {
-                            f += corrM[k] * outputM[k * hidden_size + j];
-                        }
-                        inputM[i * hidden_size + j] = f / input_size;
+                for (int j = 0; j < hidden_size; j++) {
+                    real f = 0.f;
+                    #pragma simd
+                    for (int k = 0; k < output_size; k++) {
+                        f += corrM[k] * outputM[k * hidden_size + j];
                     }
+//                        inputM[i * hidden_size + j] = f / input_size;
+                    cbowM[j] = f;
                 }
 #else
-            //inputM -> Min
-                for (int i = 0; i < input_size; i++) {
-                    for (int j = 0; j < hidden_size; j++) {
-                        real f = 0.f;
-                        #pragma simd
-                        for (int k = 0; k < output_size; k++) {
-                            f += corrM[k] * outputM[k * hidden_size + j];
-                        }
-                        inputM[i * hidden_size + j] = f / input_size;
-                    }
-                }
+             //inputM -> Min
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, 1, hidden_size, output_size, 1.0f, corrM,
+                        1, outputM, hidden_size, 0.0f, cbowM, hidden_size);
 #endif
                 // subnet update
                 for (int i = 0; i < input_size; i++) {
@@ -1046,8 +1048,313 @@ void Train_CBOWNS() {
                     int des = inputs[input_start + i] * hidden_size;
                     #pragma simd
                     for (int j = 0; j < hidden_size; j++) {
-                        Wih[des + j] += inputM[src + j];
+                        Wih[des + j] += cbowM[j];
                     }
+                }
+
+                for (int i = 0; i < output_size; i++) {
+                    int src = i * hidden_size;
+                    int des = outputs.indices[i] * hidden_size;
+                    #pragma simd
+                    for (int j = 0; j < hidden_size; j++) {
+                        Woh[des + j] += outputMd[src + j];
+                    }
+                }
+            }
+            sentence_position++;
+            if (sentence_position >= sentence_length) {
+                sentence_length = 0;
+            }
+        }
+        _mm_free(inputM);
+        _mm_free(outputM);
+        _mm_free(outputMd);
+        _mm_free(corrM);
+        if (disk) {
+            fclose(fin);
+        } else {
+            _mm_free(stream);
+        }
+    }
+
+}
+
+void MatrixAdd(real matrix0[],int row0,int col0,real matrix1[]){
+    for(int r=0;r<row0;r++){
+        for(int c=0;c<col0;c++){
+            matrix0[r*col0+c] += matrix1[r*col0+c];
+        }
+    }
+}
+void VectorAdd(real vector0[], int col0, real matrix1[], int matrix1_start, real alpha){
+    for(int i = 0;i<col0;i++){
+        vector0[i] += alpha * matrix1[matrix1_start*col0+i];
+    }
+}
+void VectorAddBW(real matrix0[], int col0, real vector1[], int matrix0_start, real alpha){
+    for(int i = 0;i<col0;i++){
+        matrix0[matrix0_start*col0+i] += alpha * vector1[i];
+    }
+}
+void VectorMul(real matrix0[], int col0, real scale, int matrix0_start){
+    for(int i = 0;i < col0;i++){
+        matrix0[matrix0_start*(col0)+i] *= scale;
+    }
+}
+void VectorMul(real vector0[], int col0, real matrix1[], int matrix0_start){
+    for(int i = 0;i<col0;i++){
+        vector0[i] *= matrix1[matrix0_start*col0+i];
+    }
+}
+void Train_CBOWBasedNS() {
+
+    int char_list_cnt;
+    long long tot;
+    wchar_t ch[10];
+    char buf[10], pos;
+    real *vec = (real*)calloc(hidden_size, sizeof(real));
+
+    if (read_vocab_file[0] != 0) {
+        ReadVocab();
+    } else {
+        LearnVocabFromTrainFile();
+    }
+    if (save_vocab_file[0] != 0) SaveVocab();
+    if (output_file[0] == 0) return;
+
+    InitNet(); //?
+    InitUnigramTable();
+
+    real starting_alpha = alpha; //learning rate
+    ulonglong word_count_actual = 0; //current word number
+    double start = 0;
+
+#pragma omp parallel num_threads(num_threads)
+    {
+
+        long long a, b, d, cw, t1, t2, word, last_word,  charv_id;
+        long long l1, l2, c, label, index;
+        long long *charv_id_list = (long long *)calloc(MAX_SENTENCE_LENGTH, sizeof(long long));
+        int char_list_cnt;
+        real *neu1char = (real*)calloc(hidden_size, sizeof(real));
+        int id = omp_get_thread_num(); //thread id
+        int local_iter = iter;
+        ulonglong next_random = id;
+        ulonglong word_count = 0, last_word_count = 0; //this thread word count
+        int sentence_length = 0, sentence_position = 0; //sentence?
+        int sen[MAX_SENTENCE_LENGTH] __attribute__((aligned(64)));
+
+
+
+        //load stream
+        FILE *fin = fopen(train_file, "rb"); //open text file
+        fseek(fin, file_size * id / num_threads, SEEK_SET); //get pointer
+        //get how many words need be trained.
+        ulonglong local_train_words = train_words / num_threads + (train_words % num_threads > 0 ? 1 : 0);
+        int *stream;
+        int w; //word
+
+        if (!disk) {
+            stream = (int *) _mm_malloc((local_train_words + 1) * sizeof(int), 64);
+            local_train_words = loadStream(fin, stream, local_train_words); //read words
+            fclose(fin);
+        }
+
+        //temporary memory for calculating
+        real *inputM = (real *) _mm_malloc(batch_size * hidden_size * sizeof(real), 64);
+        real *outputM = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+        real *outputMd = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+//        real * corrM = (real *) _mm_malloc((1 + negative) * batch_size * sizeof(real), 64);
+        real *corrM = (real *) _mm_malloc((1 + negative) * sizeof(real), 64);
+//        real * cbowM = (real *) _mm_malloc(hidden_size * sizeof(real),64);
+        real cbowM[hidden_size] __attribute__((aligned(64)));
+        int inputs[2 * window + 1] __attribute__((aligned(64))); //?
+        sequence outputs(1 + negative);
+
+        #pragma omp barrier
+
+        if (id == 0) {
+            start = omp_get_wtime();
+        }
+
+        while (1) {
+            if (word_count - last_word_count > 10000) {
+                ulonglong diff = word_count - last_word_count;
+                #pragma omp atomic
+                word_count_actual += diff;
+
+                last_word_count = word_count;
+                if (debug_mode > 1) {
+                    double now = omp_get_wtime();
+                    printf("%cAlpha: %f  Progress: %.2f%%  Words/sec: %.2fk", 13, alpha,
+                           word_count_actual / (real) (iter * train_words + 1) * 100,
+                           word_count_actual / ((now - start) * 1000));
+                    fflush(stdout);
+                }
+                alpha = starting_alpha * (1 - word_count_actual / (real) (iter * train_words + 1));
+                if (alpha < starting_alpha * 0.0001f)
+                    alpha = starting_alpha * 0.0001f;
+            }
+            if (sentence_length == 0) {
+                while (1) {
+                    if (disk) {
+                        w = ReadWordIndex(fin);
+                        if (feof(fin)) break;
+                        if (w == -1) continue;
+                    } else {
+                        w = stream[word_count];
+                    }
+                    word_count++;
+                    if (w == 0) break;
+                    // The subsampling randomly discards frequent words while keeping the ranking same
+                    if (sample > 0) {
+                        real ratio = (sample * train_words) / vocab[w].cn;
+                        real ran = sqrtf(ratio) + ratio;
+                        next_random = next_random * (ulonglong) 25214903917 + 11;
+                        if (ran < (next_random & 0xFFFF) / 65536.f)
+                            continue;
+                    }
+                    sen[sentence_length] = w;
+                    sentence_length++;
+                    if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+                }
+                sentence_position = 0;
+            }
+            if ((disk && feof(fin)) || (word_count > local_train_words)) {
+                ulonglong diff = word_count - last_word_count;
+                #pragma omp atomic
+                word_count_actual += diff;
+
+                local_iter--;
+                if (local_iter == 0) break;
+                word_count = 0;
+                last_word_count = 0;
+                sentence_length = 0;
+                if (disk) {
+                    fseek(fin, file_size * id / num_threads, SEEK_SET);
+                }
+                continue;
+            }
+
+            int target = sen[sentence_position];
+            outputs.indices[0] = target;
+            outputs.meta[0] = 1;
+
+            // get all input contexts around the target word
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            int b = next_random % window;
+
+            int num_inputs = 0;
+            for (int i = b; i < 2 * window + 1 - b; i++) {
+                if (i != window) {
+                    int c = sentence_position - window + i;
+                    if (c < 0)
+                        continue;
+                    if (c >= sentence_length)
+                        break;
+                    inputs[num_inputs] = sen[c];
+                    num_inputs++;
+                }
+            }
+
+            int num_batches = num_inputs / batch_size + ((num_inputs % batch_size > 0) ? 1 : 0);
+
+            // start mini-batches
+            for (int b = 0; b < num_batches; b++) {
+                //generate negative samples for output layer
+                int offset = 1;
+                for (int k = 0; k < negative; k++) {
+                    next_random = next_random * (ulonglong) 25214903917 + 11;
+                    int sample = table[(next_random >> 16) % table_size];
+                    if (!sample)
+                        sample = next_random % (vocab_size - 1) + 1;
+                    int *p = find(outputs.indices, outputs.indices + offset, sample);
+                    if (p == outputs.indices + offset) {
+                        outputs.indices[offset] = sample;
+                        outputs.meta[offset] = 1;
+                        offset++;
+                    } else {
+                        int idx = p - outputs.indices;
+                        outputs.meta[idx]++;
+                    }
+                }
+                outputs.meta[0] = 1;
+                outputs.length = offset;
+
+                // fetch input sub model
+                int input_start = b * batch_size;
+                int input_size = min(batch_size, num_inputs - input_start);
+                for (int i = 0; i < input_size; i++) {
+                    memcpy(inputM + i * hidden_size, Wih + inputs[input_start + i] * hidden_size,
+                           hidden_size * sizeof(real));
+                }
+                // fetch output sub model
+                int output_size = outputs.length;
+                for (int i = 0; i < output_size; i++) {
+                    memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
+                           hidden_size * sizeof(real));
+                }
+
+
+                for (int k = 0; k < hidden_size; k++) cbowM[k] = 0.f;
+//                matrixAdd()
+
+                for (int j = 0; j < input_size; j++) {
+                    if(cwe_type==0)
+                        VectorAdd(cbowM,hidden_size,inputM,j,1.0f);
+                    if(cwe_type==1){
+                        for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                        if (cwe_type && vocab[last_word].character_size) {
+                            for (c = 0; c < vocab[last_word].character_size; c++) {
+                                charv_id = vocab[last_word].character[c];
+                                VectorAdd(neu1char,hidden_size,charv,charv_id,(1.0f / vocab[last_word].character_size));
+                                charv_id_list[char_list_cnt] = charv_id;
+                                char_list_cnt++;
+                            }
+                        }
+                        VectorAdd(cbowM,hidden_size,inputM,j,1.0f);
+                    }
+
+                }
+                for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
+
+                //output_size -> negative_size +1
+                //meta -> label
+                // input_size -> N
+                // hidden_size -> D
+                // f -> inn
+                // g -> err*alpha
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, 1, hidden_size, 1.0f, outputM,
+                        hidden_size, cbowM, hidden_size, 0.0f, corrM, 1);
+                for (int i = 0; i < output_size; i++) {
+                    int c = outputs.meta[i];
+                    real f = corrM[i];
+                    int label = (i ? 0 : 1);
+                    if (f > MAX_EXP)
+                        f = (label - 1) * alpha;
+                    else if (f < -MAX_EXP)
+                        f = label * alpha;
+                    else
+                        f = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                    corrM[i] = f * c;
+
+                }
+
+
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, 1, 1.0f, corrM,
+                        1, cbowM, hidden_size, 0.0f, outputMd, hidden_size);
+
+
+                //inputM -> Min
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, 1, hidden_size, output_size, 1.0f, corrM,
+                        1, outputM, hidden_size, 0.0f, cbowM, hidden_size);
+
+                // subnet update
+                for (int i = 0; i < input_size; i++) {
+//                    int src = i * hidden_size;
+//                    int des = inputs[input_start + i] * hidden_size;
+
+                    VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
                 }
 
                 for (int i = 0; i < output_size; i++) {
@@ -1107,7 +1414,7 @@ void Train_CWENS() {
         long long l1, l2, c, label, index;
         long long *charv_id_list = (long long *)calloc(MAX_SENTENCE_LENGTH, sizeof(long long));
         int char_list_cnt;
-
+        real *neu1char = (real*)calloc(hidden_size, sizeof(real));
         int id = omp_get_thread_num(); //thread id
         int local_iter = iter;
         ulonglong next_random = id;
@@ -1265,7 +1572,6 @@ void Train_CWENS() {
                     memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
                            hidden_size * sizeof(real));
                 }
-
                 #ifndef USE_MKL
 
                 //calculate cbow average
@@ -1274,7 +1580,7 @@ void Train_CWENS() {
                     last_word = inputs[j];
 //                    printf("calc neu1char1\n");
                     for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
-                    for (c = 0; c < hidden_size; c++) neu1char[c] = inputM[c + last_word * hidden_size];
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size];
                     if (cwe_type && vocab[last_word].character_size) {
                         for (c = 0; c < vocab[last_word].character_size; c++) {
                             charv_id = vocab[last_word].character[c];
@@ -1293,6 +1599,717 @@ void Train_CWENS() {
 //                    printf("neu->cbow2\n");
                 }
                 for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
+
+                //output_size -> negative_size +1
+                //meta -> label
+                // input_size -> N
+                // hidden_size -> D
+                // f -> inn
+                // g -> err*alp a
+                for (int i = 0; i < output_size; i++) {
+                    int c = outputs.meta[i];
+
+                    real f = 0.f, g;
+                    #pragma simd
+                    for (int k = 0; k < hidden_size; k++) {
+                        f += outputM[i * hidden_size + k] * cbowM[k];
+                    }
+                    int label = (i ? 0 : 1);
+                    if (f > MAX_EXP)
+                        g = (label - 1) * alpha;
+                    else if (f < -MAX_EXP)
+                        g = label * alpha;
+                    else
+                        g = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                    corrM[i] = g * c;
+                }
+#else
+//                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, input_size, hidden_size, 1.0f, outputM,
+//                        hidden_size, inputM, hidden_size, 0.0f, corrM, input_size);
+//                printf("CWE before calculate vec\n");
+                for (int k = 0; k < hidden_size; k++) cbowM[k] = 0.f;
+                for (int j = 0; j < input_size; j++) {
+                    last_word = inputs[j];
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size];
+                    if (cwe_type && vocab[last_word].character_size) {
+                        for (c = 0; c < vocab[last_word].character_size; c++) {
+                            charv_id = vocab[last_word].character[c];
+                            for (d = 0; d < hidden_size; d++)
+                                neu1char[d] += charv[d + charv_id * hidden_size] / vocab[last_word].character_size;
+                            charv_id_list[char_list_cnt] = charv_id;
+                            char_list_cnt++;
+                        }
+                        for (d = 0; d < hidden_size; d++) neu1char[d] /= 2;
+                    }
+
+                    #pragma simd
+                    for (int k = 0; k < hidden_size; k++) {
+                        cbowM[k] += neu1char[k];
+                    }
+                }
+//                printf("CWE before calculate vec\n");
+                for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
+
+                //output_size -> negative_size +1
+                //meta -> label
+                // input_size -> N
+                // hidden_size -> D
+                // f -> inn
+                // g -> err*alpha
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, 1, hidden_size, 1.0f, outputM,
+                        hidden_size, cbowM, hidden_size, 0.0f, corrM, 1);
+                for (int i = 0; i < output_size; i++) {
+                    int c = outputs.meta[i];
+                    #pragma simd
+                    real f = corrM[i];
+                    int label = (i ? 0 : 1);
+                    if (f > MAX_EXP)
+                        f = (label - 1) * alpha;
+                    else if (f < -MAX_EXP)
+                        f = label * alpha;
+                    else
+                        f = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                    corrM[i] = f * c;
+
+                }
+#endif
+#ifndef USE_MKL
+                // outputMd -> update Mout
+                for (int i = 0; i < output_size; i++) {
+                    for (int j = 0; j < hidden_size; j++) {
+                        real f = 0.f;
+                        f += corrM[i] * cbowM[j];
+                        outputMd[i * hidden_size + j] = f;
+                    }
+                }
+#else
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, 1, 1.0f, corrM,
+                        1, cbowM, hidden_size, 0.0f, outputMd, hidden_size);
+#endif
+#ifndef USE_MKL
+                printf("use mkl\n");
+                //inputM -> Min
+                for (int i = 0; i < input_size; i++) {
+                    for (int j = 0; j < hidden_size; j++) {
+                        real f = 0.f;
+                        #pragma simd
+                        for (int k = 0; k < output_size; k++) {
+                            f += corrM[k] * outputM[k * hidden_size + j];
+                        }
+//                        inputM[i * hidden_size + j] = f / input_size;
+                        inputM[i * hidden_size + j] = f;
+                    }
+                }
+#else
+                //inputM -> Min
+                for (int i = 0; i < input_size; i++) {
+                    for (int j = 0; j < hidden_size; j++) {
+                        real f = 0.f;
+                        #pragma simd
+                        for (int k = 0; k < output_size; k++) {
+                            f += corrM[k] * outputM[k * hidden_size + j];
+                        }
+//                        inputM[i * hidden_size + j] = f / input_size;
+                        inputM[i * hidden_size + j] = f;
+                    }
+                }
+#endif
+                // subnet update
+                for (int i = 0; i < input_size; i++) {
+                    int src = i * hidden_size;
+                    int des = inputs[input_start + i] * hidden_size;
+                    #pragma simd
+                    for (int j = 0; j < hidden_size; j++) {
+                        Wih[des + j] += inputM[src + j];
+                    }
+//                    last_word = inputs[j];
+
+
+                }
+                //debug
+//                printf("update charv1\n");
+                for (c = 0; c < input_size; c++) {
+//                    charv_id = charv_id_list[inputs[c]];
+                    for(int i = 0;i<vocab[inputs[c]].character_size;i++){
+                        for (d = 0; d < hidden_size; d++)
+                            charv[d + vocab[inputs[c]].character[i] * hidden_size] += inputM[c*hidden_size+d];
+                    }
+//
+//                    charv_id = vocab[inputs[c]].cha
+//                    for (d = 0; d < hidden_size; d++) charv[d + charv_id * hidden_size] += neu1e[d] * char_rate;
+                }
+//                printf("update charv2\n");
+
+                for (int i = 0; i < output_size; i++) {
+                    int src = i * hidden_size;
+                    int des = outputs.indices[i] * hidden_size;
+#pragma simd
+                    for (int j = 0; j < hidden_size; j++) {
+                        Woh[des + j] += outputMd[src + j];
+                    }
+                }
+            }
+            sentence_position++;
+            if (sentence_position >= sentence_length) {
+                sentence_length = 0;
+            }
+        }
+        _mm_free(inputM);
+        _mm_free(outputM);
+        _mm_free(outputMd);
+        _mm_free(corrM);
+        if (disk) {
+            fclose(fin);
+        } else {
+            _mm_free(stream);
+        }
+    }
+
+}
+void Train_CWESGNS(){
+#ifdef USE_MKL
+    mkl_set_num_threads(1);
+#endif
+
+    if (read_vocab_file[0] != 0) {
+        ReadVocab();
+    }
+    else {
+        LearnVocabFromTrainFile();
+    }
+    if (save_vocab_file[0] != 0) SaveVocab();
+    if (output_file[0] == 0) return;
+
+    InitNet();
+    InitUnigramTable();
+
+    real starting_alpha = alpha;
+    ulonglong word_count_actual = 0;
+    double start = 0;
+
+#pragma omp parallel num_threads(num_threads)
+    {
+        long long a, b, d, cw, t1, t2, word, last_word,  charv_id;
+        long long l1, l2, c, label, index;
+        long long *charv_id_list = (long long *)calloc(MAX_SENTENCE_LENGTH, sizeof(long long));
+        int char_list_cnt;
+        real *neu1char = (real*)calloc(hidden_size, sizeof(real));
+
+        int id = omp_get_thread_num();
+        int local_iter = iter;
+        ulonglong  next_random = id;
+        ulonglong word_count = 0, last_word_count = 0;
+        int sentence_length = 0, sentence_position = 0;
+        int sen[MAX_SENTENCE_LENGTH] __attribute__((aligned(64)));
+
+        // load stream
+        FILE *fin = fopen(train_file, "rb");
+        fseek(fin, file_size * id / num_threads, SEEK_SET);
+
+        ulonglong local_train_words = train_words / num_threads + (train_words % num_threads > 0 ? 1 : 0);
+        int *stream;
+        int w;
+
+        if (!disk) {
+            stream = (int *) _mm_malloc((local_train_words + 1) * sizeof(int), 64);
+            local_train_words = loadStream(fin, stream, local_train_words);
+            fclose(fin);
+        }
+
+        // temporary memory
+        real * inputM = (real *) _mm_malloc(batch_size * hidden_size * sizeof(real), 64);
+        real * outputM = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+        real * outputMd = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+        real * corrM = (real *) _mm_malloc((1 + negative) * batch_size * sizeof(real), 64);
+
+        int inputs[2 * window + 1] __attribute__((aligned(64)));
+        sequence outputs(1 + negative);
+
+#pragma omp barrier
+
+        if (id == 0)
+        {
+            start = omp_get_wtime();
+        }
+
+        while (1) {
+            if (word_count - last_word_count > 10000) {
+                ulonglong diff = word_count - last_word_count;
+#pragma omp atomic
+                word_count_actual += diff;
+
+                last_word_count = word_count;
+                if (debug_mode > 1) {
+                    double now = omp_get_wtime();
+                    printf("%cAlpha: %f  Progress: %.2f%%  Words/sec: %.2fk", 13, alpha,
+                           word_count_actual / (real) (iter * train_words + 1) * 100,
+                           word_count_actual / ((now - start) * 1000));
+                    fflush(stdout);
+                }
+                alpha = starting_alpha * (1 - word_count_actual / (real) (iter * train_words + 1));
+                if (alpha < starting_alpha * 0.0001f)
+                    alpha = starting_alpha * 0.0001f;
+            }
+            if (sentence_length == 0) {
+                while (1) {
+                    if (disk) {
+                        w = ReadWordIndex(fin);
+                        if (feof(fin)) break;
+                        if (w == -1) continue;
+                    } else {
+                        w = stream[word_count];
+                    }
+                    word_count++;
+                    if (w == 0) break;
+                    // The subsampling randomly discards frequent words while keeping the ranking same
+                    if (sample > 0) {
+                        real ratio = (sample * train_words) / vocab[w].cn;
+                        real ran = sqrtf(ratio) + ratio;
+                        next_random = next_random * (ulonglong) 25214903917 + 11;
+                        if (ran < (next_random & 0xFFFF) / 65536.f)
+                            continue;
+                    }
+                    sen[sentence_length] = w;
+                    sentence_length++;
+                    if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+                }
+                sentence_position = 0;
+            }
+            if ((disk && feof(fin)) || (word_count > local_train_words)) {
+                ulonglong diff = word_count - last_word_count;
+#pragma omp atomic
+                word_count_actual += diff;
+
+                local_iter--;
+                if (local_iter == 0) break;
+                word_count = 0;
+                last_word_count = 0;
+                sentence_length = 0;
+                if (disk) {
+                    fseek(fin, file_size * id / num_threads, SEEK_SET);
+                }
+                continue;
+            }
+
+            int target = sen[sentence_position];
+            outputs.indices[0] = target;
+            outputs.meta[0] = 1;
+
+            // get all input contexts around the target word
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            int b = next_random % window;
+
+            int num_inputs = 0;
+            for (int i = b; i < 2 * window + 1 - b; i++) {
+                if (i != window) {
+                    int c = sentence_position - window + i;
+                    if (c < 0)
+                        continue;
+                    if (c >= sentence_length)
+                        break;
+                    inputs[num_inputs] = sen[c];
+                    num_inputs++;
+                }
+            }
+
+            int num_batches = num_inputs / batch_size + ((num_inputs % batch_size > 0) ? 1 : 0);
+
+            // start mini-batches
+            for (int b = 0; b < num_batches; b++) {
+
+                // generate negative samples for output layer
+                int offset = 1;
+                for (int k = 0; k < negative; k++) {
+                    next_random = next_random * (ulonglong) 25214903917 + 11;
+                    int sample = table[(next_random >> 16) % table_size];
+                    if (!sample)
+                        sample = next_random % (vocab_size - 1) + 1;
+                    int* p = find(outputs.indices, outputs.indices + offset, sample);
+                    if (p == outputs.indices + offset) {
+                        outputs.indices[offset] = sample;
+                        outputs.meta[offset] = 1;
+                        offset++;
+                    } else {
+                        int idx = p - outputs.indices;
+                        outputs.meta[idx]++;
+                    }
+                }
+                outputs.meta[0] = 1;
+                outputs.length = offset;
+
+                // fetch input sub model
+                int input_start = b * batch_size;
+                int input_size  = min(batch_size, num_inputs - input_start);
+                for (int i = 0; i < input_size; i++) {
+                    memcpy(inputM + i * hidden_size, Wih + inputs[input_start + i] * hidden_size, hidden_size * sizeof(real));
+                }
+                // fetch output sub model
+                int output_size = outputs.length;
+                for (int i = 0; i < output_size; i++) {
+                    memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size, hidden_size * sizeof(real));
+                }
+                for (int i = 0; i < input_size; i++) {
+                    last_word = inputs[i];
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size];
+                    if (cwe_type && vocab[last_word].character_size) {
+                        for (c = 0; c < vocab[last_word].character_size; c++) {
+                            charv_id = vocab[last_word].character[c];
+                            for (d = 0; d < hidden_size; d++)
+                                neu1char[d] += charv[d + charv_id * hidden_size] / vocab[last_word].character_size;
+                            charv_id_list[char_list_cnt] = charv_id;
+                            char_list_cnt++;
+                        }
+                        for (d = 0; d < hidden_size; d++) neu1char[d] /= 2;
+                    }
+                    for (c = 0; c < hidden_size; c++) Wih[c + last_word * hidden_size] = neu1char[c];
+                }
+#ifndef USE_MKL
+                //output_size -> negative_size +1
+                //meta -> label
+                // input_size -> N
+                // hidden_size -> D
+                // f -> inn
+                // g -> err*alpha
+                for (int i = 0; i < output_size; i++) {
+                    int c = outputs.meta[i];
+                    for (int j = 0; j < input_size; j++) {
+                        real f = 0.f, g;
+#pragma simd
+                        for (int k = 0; k < hidden_size; k++) {
+                            f += outputM[i * hidden_size + k] * inputM[j * hidden_size + k];
+                        }
+                        int label = (i ? 0 : 1);
+                        if (f > MAX_EXP)
+                            g = (label - 1) * alpha;
+                        else if (f < -MAX_EXP)
+                            g = label * alpha;
+                        else
+                            g = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                        corrM[i * input_size + j] = g * c;
+                    }
+                }
+#else
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, input_size, hidden_size, 1.0f, outputM,
+                        hidden_size, inputM, hidden_size, 0.0f, corrM, input_size);
+                for (int i = 0; i < output_size; i++) {
+                    int c = outputs.meta[i];
+                    int offset = i * input_size;
+                    #pragma simd
+                    for (int j = 0; j < input_size; j++) {
+                        real f = corrM[offset + j];
+                        int label = (i ? 0 : 1);
+                        if (f > MAX_EXP)
+                            f = (label - 1) * alpha;
+                        else if (f < -MAX_EXP)
+                            f = label * alpha;
+                        else
+                            f = (label - expTable[(int) ((f + MAX_EXP) * EXP_RESOLUTION)]) * alpha;
+                        corrM[offset + j] = f * c;
+                    }
+                }
+#endif
+
+#ifndef USE_MKL
+                // outputMd -> update Mout
+                for (int i = 0; i < output_size; i++) {
+                    for (int j = 0; j < hidden_size; j++) {
+                        real f = 0.f;
+#pragma simd
+                        for (int k = 0; k < input_size; k++) {
+                            f += corrM[i * input_size + k] * inputM[k * hidden_size + j];
+                        }
+                        outputMd[i * hidden_size + j] = f;
+                    }
+                }
+#else
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, input_size, 1.0f, corrM,
+                        input_size, inputM, hidden_size, 0.0f, outputMd, hidden_size);
+#endif
+
+#ifndef USE_MKL
+
+                //inputM -> Min
+                for (int i = 0; i < input_size; i++) {
+                    for (int j = 0; j < hidden_size; j++) {
+                        real f = 0.f;
+#pragma simd
+                        for (int k = 0; k < output_size; k++) {
+                            f += corrM[k * input_size + i] * outputM[k * hidden_size + j];
+                        }
+                        inputM[i * hidden_size + j] = f;
+                    }
+                }
+#else
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, input_size, hidden_size, output_size, 1.0f, corrM,
+                        input_size, outputM, hidden_size, 0.0f, inputM, hidden_size);
+#endif
+
+                // subnet update
+                for (int i = 0; i < input_size; i++) {
+                    int src = i * hidden_size;
+                    int des = inputs[input_start + i] * hidden_size;
+#pragma simd
+                    for (int j = 0; j < hidden_size; j++) {
+                        Wih[des + j] += inputM[src + j];
+                    }
+                    for (c = 0; c < char_list_cnt; c++) {
+                        charv_id = charv_id_list[c];
+                        for (d = 0; d < hidden_size; d++) charv[d + charv_id * hidden_size] += inputM[src + d] * 1;
+                    }
+                }
+
+                for (int i = 0; i < output_size; i++) {
+                    int src = i * hidden_size;
+                    int des = outputs.indices[i] * hidden_size;
+#pragma simd
+                    for (int j = 0; j < hidden_size; j++) {
+                        Woh[des + j] += outputMd[src + j];
+                    }
+                }
+
+            }
+
+            sentence_position++;
+            if (sentence_position >= sentence_length) {
+                sentence_length = 0;
+            }
+        }
+        _mm_free(inputM);
+        _mm_free(outputM);
+        _mm_free(outputMd);
+        _mm_free(corrM);
+        if (disk) {
+            fclose(fin);
+        } else {
+            _mm_free(stream);
+        }
+    }
+}
+void Train_DSENS() {
+
+    int char_list_cnt;
+    long long tot;
+    wchar_t ch[10];
+    char buf[10], pos;
+    double max_a = 0.f;
+    real *vec = (real*)calloc(hidden_size, sizeof(real));
+#ifdef USE_MKL
+    mkl_set_num_threads(1);
+#endif
+    if (read_vocab_file[0] != 0) {
+        ReadVocab();
+    } else {
+        LearnVocabFromTrainFile();
+    }
+    if (save_vocab_file[0] != 0) SaveVocab();
+    if (output_file[0] == 0) return;
+
+    InitNet(); //?
+    InitUnigramTable();
+
+    real starting_alpha = alpha; //learning rate
+    ulonglong word_count_actual = 0; //current word number
+    double start = 0;
+
+#pragma omp parallel num_threads(num_threads)
+    {
+        long long a, b, d, cw, t1, t2, word, last_word,  charv_id;
+        long long l1, l2, c, label, index;
+        long long *charv_id_list = (long long *)calloc(MAX_SENTENCE_LENGTH, sizeof(long long));
+        int char_list_cnt;
+        real *neu1char = (real*)calloc(hidden_size, sizeof(real));
+        int id = omp_get_thread_num(); //thread id
+        int local_iter = iter;
+        ulonglong next_random = id;
+        ulonglong word_count = 0, last_word_count = 0; //this thread word count
+        int sentence_length = 0, sentence_position = 0; //sentence?
+        int sen[MAX_SENTENCE_LENGTH] __attribute__((aligned(64)));
+
+        //load stream
+        FILE *fin = fopen(train_file, "rb"); //open text file
+        fseek(fin, file_size * id / num_threads, SEEK_SET); //get pointer
+        //get how many words need be trained.
+        ulonglong local_train_words = train_words / num_threads + (train_words % num_threads > 0 ? 1 : 0);
+        int *stream;
+        int w; //word
+
+        if (!disk) {
+            stream = (int *) _mm_malloc((local_train_words + 1) * sizeof(int), 64);
+            local_train_words = loadStream(fin, stream, local_train_words); //read words
+            fclose(fin);
+        }
+
+        //temporary memory for calculating
+        real *inputM = (real *) _mm_malloc(batch_size * hidden_size * sizeof(real), 64);
+        real *outputM = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+        real *outputMd = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
+//        real * corrM = (real *) _mm_malloc((1 + negative) * batch_size * sizeof(real), 64);
+        real *corrM = (real *) _mm_malloc((1 + negative) * sizeof(real), 64);
+        real *weightM = (real *) _mm_malloc(batch_size * sizeof(real),64);
+//        real * cbowM = (real *) _mm_malloc(hidden_size * sizeof(real),64);
+        real cbowM[hidden_size] __attribute__((aligned(64)));
+        int inputs[2 * window + 1] __attribute__((aligned(64))); //?
+        sequence outputs(1 + negative);
+
+#pragma omp barrier
+
+        if (id == 0) {
+            start = omp_get_wtime();
+        }
+
+        while (1) {
+            if (word_count - last_word_count > 10000) {
+                ulonglong diff = word_count - last_word_count;
+#pragma omp atomic
+                word_count_actual += diff;
+
+                last_word_count = word_count;
+                if (debug_mode > 1) {
+                    double now = omp_get_wtime();
+                    printf("%cAlpha: %f  Progress: %.2f%%  Words/sec: %.2fk", 13, alpha,
+                           word_count_actual / (real) (iter * train_words + 1) * 100,
+                           word_count_actual / ((now - start) * 1000));
+                    fflush(stdout);
+                }
+                alpha = starting_alpha * (1 - word_count_actual / (real) (iter * train_words + 1));
+                if (alpha < starting_alpha * 0.0001f)
+                    alpha = starting_alpha * 0.0001f;
+            }
+            if (sentence_length == 0) {
+                while (1) {
+                    if (disk) {
+                        w = ReadWordIndex(fin);
+                        if (feof(fin)) break;
+                        if (w == -1) continue;
+                    } else {
+                        w = stream[word_count];
+                    }
+                    word_count++;
+                    if (w == 0) break;
+                    // The subsampling randomly discards frequent words while keeping the ranking same
+                    if (sample > 0) {
+                        real ratio = (sample * train_words) / vocab[w].cn;
+                        real ran = sqrtf(ratio) + ratio;
+                        next_random = next_random * (ulonglong) 25214903917 + 11;
+                        if (ran < (next_random & 0xFFFF) / 65536.f)
+                            continue;
+                    }
+                    sen[sentence_length] = w;
+                    sentence_length++;
+                    if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+                }
+                sentence_position = 0;
+            }
+            if ((disk && feof(fin)) || (word_count > local_train_words)) {
+                ulonglong diff = word_count - last_word_count;
+                #pragma omp atomic
+                word_count_actual += diff;
+
+                local_iter--;
+                if (local_iter == 0) break;
+                word_count = 0;
+                last_word_count = 0;
+                sentence_length = 0;
+                if (disk) {
+                    fseek(fin, file_size * id / num_threads, SEEK_SET);
+                }
+                continue;
+            }
+
+            int target = sen[sentence_position];
+            outputs.indices[0] = target;
+            outputs.meta[0] = 1;
+
+            // get all input contexts around the target word
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            int b = next_random % window;
+
+            int num_inputs = 0;
+            cw = 0;
+            char_list_cnt = 0;
+            for (int i = b; i < 2 * window + 1 - b; i++) {
+                if (i != window) {
+                    int c = sentence_position - window + i;
+                    if (c < 0)
+                        continue;
+                    if (c >= sentence_length)
+                        break;
+                    inputs[num_inputs] = sen[c];
+                    num_inputs++;
+                }
+            }
+
+            int num_batches = num_inputs / batch_size + ((num_inputs % batch_size > 0) ? 1 : 0);
+
+            // start mini-batches
+            for (int b = 0; b < num_batches; b++) {
+                //generate negative samples for output layer
+                int offset = 1;
+                for (int k = 0; k < negative; k++) {
+                    next_random = next_random * (ulonglong) 25214903917 + 11;
+                    int sample = table[(next_random >> 16) % table_size];
+                    if (!sample)
+                        sample = next_random % (vocab_size - 1) + 1;
+                    int *p = find(outputs.indices, outputs.indices + offset, sample);
+                    if (p == outputs.indices + offset) {
+                        outputs.indices[offset] = sample;
+                        outputs.meta[offset] = 1;
+                        offset++;
+                    } else {
+                        int idx = p - outputs.indices;
+                        outputs.meta[idx]++;
+                    }
+                }
+                outputs.meta[0] = 1;
+                outputs.length = offset;
+
+                // fetch input sub model
+                int input_start = b * batch_size;
+                int input_size = min(batch_size, num_inputs - input_start);
+                for (int i = 0; i < input_size; i++) {
+                    memcpy(inputM + i * hidden_size, Wih + inputs[input_start + i] * hidden_size,
+                           hidden_size * sizeof(real));
+                }
+                // fetch output sub model
+                int output_size = outputs.length;
+                for (int i = 0; i < output_size; i++) {
+                    memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
+                           hidden_size * sizeof(real));
+                }
+//                int input_size = min(batch_size, num_inputs - input_start);
+                for (int i = 0; i < input_size; i++) {
+                    memcpy(weightM + i , WeightH + inputs[input_start + i] ,
+                           sizeof(real));
+                }
+                #ifndef USE_MKL
+
+                //calculate cbow average
+                for (int k = 0; k < hidden_size; k++) cbowM[k] = 0.f;
+                for (int j = 0; j < input_size; j++) {
+                    last_word = inputs[j];
+//                    printf("calc neu1char1\n");
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size] * weightM[j];
+                    if (cwe_type && vocab[last_word].character_size) {
+                        for (c = 0; c < vocab[last_word].character_size; c++) {
+                            charv_id = vocab[last_word].character[c];
+                            for (d = 0; d < hidden_size; d++)
+                                neu1char[d] += (charv[d + charv_id * hidden_size] / vocab[last_word].character_size) * (1.0f - weightM[j]);
+                            charv_id_list[char_list_cnt] = charv_id;
+                            char_list_cnt++;
+                        }
+//                        for (d = 0; d < hidden_size; d++) neu1char[d] /= 2;
+                    }
+//                    printf("calc neu1char2\n");
+                    #pragma simd
+                    for (int k = 0; k < hidden_size; k++) {
+                        cbowM[k] += neu1char[k];
+                    }
+//                    printf("neu->cbow2\n");
+                }
+//                for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
 
                 //output_size -> negative_size +1
                 //meta -> label
@@ -1320,12 +2337,26 @@ void Train_CWENS() {
 #else
                 for (int k = 0; k < hidden_size; k++) cbowM[k] = 0.f;
                 for (int j = 0; j < input_size; j++) {
+                    last_word = inputs[j];
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size] * weightM[j];
+                    if (cwe_type && vocab[last_word].character_size) {
+                        for (c = 0; c < vocab[last_word].character_size; c++) {
+                            charv_id = vocab[last_word].character[c];
+                            for (d = 0; d < hidden_size; d++)
+                                neu1char[d] += (charv[d + charv_id * hidden_size] / vocab[last_word].character_size) * (1.0f - weightM[j]);
+                            charv_id_list[char_list_cnt] = charv_id;
+                            char_list_cnt++;
+                        }
+//                        for (d = 0; d < hidden_size; d++) neu1char[d] /= 2;
+                    }
+
                     #pragma simd
                     for (int k = 0; k < hidden_size; k++) {
-                        cbowM[k] += inputM[j * hidden_size + k];
+                        cbowM[k] += neu1char[k];
                     }
                 }
-                for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
+//                for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
 
                 //output_size -> negative_size +1
                 //meta -> label
@@ -1375,7 +2406,7 @@ void Train_CWENS() {
                 for (int i = 0; i < input_size; i++) {
                     for (int j = 0; j < hidden_size; j++) {
                         real f = 0.f;
-#pragma simd
+                        #pragma simd
                         for (int k = 0; k < output_size; k++) {
                             f += corrM[k] * outputM[k * hidden_size + j];
                         }
@@ -1395,36 +2426,53 @@ void Train_CWENS() {
                     }
                 }
 #endif
+                double sum_a = 0.f;
+                double sum_b = 0.f;
+
                 // subnet update
                 for (int i = 0; i < input_size; i++) {
                     int src = i * hidden_size;
                     int des = inputs[input_start + i] * hidden_size;
-#pragma simd
-                    for (int j = 0; j < hidden_size; j++) {
-                        Wih[des + j] += inputM[src + j];
-                    }
-//                    last_word = inputs[j];
+                    int count = 0;
+                    #pragma simd
+                    for(int c = 0;c<vocab[inputs[i]].character_size;c++){
+                        for (int d = 0; d < hidden_size; d++) {
+                            count += vocab[inputs[i]].character_size;
+                            sum_a-=(charv[d + vocab[inputs[i]].character[c] * hidden_size] * inputM[src + d] );
 
-
-                }
-                //debug
-//                printf("update charv1\n");
-                for (c = 0; c < input_size; c++) {
-//                    charv_id = charv_id_list[inputs[c]];
-                    for(int i = 0;i<vocab[inputs[c]].character_size;i++){
-                        for (d = 0; d < hidden_size; d++)
-                            charv[d + vocab[inputs[c]].character[i] * hidden_size] += inputM[c*hidden_size+d] / 2;
+//                            printf("debug 1\n");
+                            charv[d + vocab[inputs[i]].character[c] * hidden_size] += inputM[src+d] * (1.0f - weightM[i]);
+//                            printf("debug 2\n");
+                        }
                     }
-//
-//                    charv_id = vocab[inputs[c]].cha
-//                    for (d = 0; d < hidden_size; d++) charv[d + charv_id * hidden_size] += neu1e[d] * char_rate;
+                    for(int d = 0;d<hidden_size;d++){
+                        sum_b += Wih[des + d] * inputM[src+d];
+                        Wih[des + d] += inputM[src + d] * weightM[i];
+                    }
+                    sum_a /= count;
+                    sum_a+=sum_b;
+                    sum_a/=hidden_size;
+//                    if(sum_a>1.f){
+//                        sum_a = 1.f;
+//                    }else if(sum_a < -1.f){
+//                        sum_a = -1.f;
+//                    }
+//                    printf("debug 3\n");
+//                    if(WeightH[inputs[input_start + i]] > max_a){
+//                        max_a = WeightH[inputs[input_start + i]];
+//                        printf("%lf\n",max_a);
+//                    }
+                    WeightH[inputs[input_start + i]] += sum_a;
+//                    printf("debug 4\n");
+                    sum_a=0.f;
+                    sum_b=0.f;
                 }
-//                printf("update charv2\n");
+                sum_a = 0.f;
 
                 for (int i = 0; i < output_size; i++) {
                     int src = i * hidden_size;
                     int des = outputs.indices[i] * hidden_size;
-#pragma simd
+                    #pragma simd
                     for (int j = 0; j < hidden_size; j++) {
                         Woh[des + j] += outputMd[src + j];
                     }
@@ -1471,19 +2519,26 @@ void saveModel() {
                 fwrite(&Wih[a * hidden_size + b], sizeof(real), 1, fo);
         else{
             for (int b = 0; b < hidden_size; b++){
-                real tmp = 0.f;
-//                printf("%d\n",vocab[a].character_size);
-                for(int i = 0;i<vocab[a].character_size;i++){
-//                    printf("%f\n",charv[vocab[a].character[i] * hidden_size+b]);
-                    tmp += charv[vocab[a].character[i] * hidden_size+b];
+                if(cwe_type==1){
+                    real tmp = 0.f;
+                    for(int i = 0;i<vocab[a].character_size;i++){
+                        tmp += charv[vocab[a].character[i] * hidden_size+b];
+                    }
+                    tmp /= vocab[a].character_size;
+                    fprintf(fo, "%f ", (Wih[a * hidden_size + b]+tmp)/2);
+                }else if(cwe_type==2){
+                    real tmp = 0.f;
+                    for(int i = 0;i<vocab[a].character_size;i++){
+                        tmp += charv[vocab[a].character[i] * hidden_size+b];
+                    }
+                    tmp /= vocab[a].character_size;
+                    fprintf(fo, "%f ", (WeightH[a] * Wih[a * hidden_size + b])+(1-WeightH[a])*tmp);
+                }else{
+                    fprintf(fo, "%f ", Wih[a * hidden_size + b]);
                 }
-                tmp /= vocab[a].character_size;
-//                int des = inputs[input_start + i] * hidden_size;
-                fprintf(fo, "%f ", (Wih[a * hidden_size + b]+tmp)/2);
-//                fprintf(fo, "%f ", Wih[a * hidden_size + b]);
+
             }
         }
-
         fprintf(fo, "\n");
     }
     fclose(fo);
@@ -1519,6 +2574,9 @@ int main(int argc, char **argv) {
 
         printf("\t-debug <int>\n");
         printf("\t\tSet the debug mode (default = 2 = more info during training)\n");
+
+        printf("\t-cbow <int>\n");
+        printf("\t\tSet cwe type; default is 1(CBOW), 0(SG)\n");
         printf("\t-cwe-type <int>\n");
         printf("\t\tSet cwe type; default is 1(CWE), 0(word2vec)\n");
         printf("\t-binary <int>\n");
@@ -1551,6 +2609,8 @@ int main(int argc, char **argv) {
         strcpy(read_vocab_file, argv[i + 1]);
     if ((i = ArgPos((char *) "-debug", argc, argv)) > 0)
         debug_mode = atoi(argv[i + 1]);
+    if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0)
+        cbow_type = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-cwe-type", argc, argv)) > 0)
         cwe_type = atoi(argv[i + 1]);
     if ((i = ArgPos((char *) "-binary", argc, argv)) > 0)
@@ -1593,13 +2653,25 @@ int main(int argc, char **argv) {
     printf("starting learning rate: %.5f\n", alpha);
     printf("stream from disk: %d\n", disk);
     printf("starting training using file: %s\n\n", train_file);
-    if(cwe_type==0){
+
+    if(cwe_type==0 && cbow_type == 1) {
+        printf("model: CBOWNS\n");
+        Train_CBOWBasedNS();
+    }else if(cwe_type==0 && cbow_type == 0){
         printf("model: SGNS\n");
         Train_SGNS();
-    }else{
+    }else if(cwe_type==1 && cbow_type ==1){
         character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         printf("model: CWENS\n");
         Train_CWENS();
+    }else if(cwe_type==1 && cbow_type ==0){
+        character_size = (MAX_CHINESE - MIN_CHINESE + 1);
+        printf("model: CWECBOWNS\n");
+        Train_CWESGNS();
+    }else if(cwe_type==2){
+        character_size = (MAX_CHINESE - MIN_CHINESE + 1);
+        printf("model: DSENS\n");
+        Train_DSENS();
     }
 //    Train_CBOWNS();
 
