@@ -448,7 +448,7 @@ void InitNet() {
         }
         #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
         for (int i = 0; i < vocab_size; i++) {
-            memset(WeightH + i , 0.5f,  sizeof(real));
+            memset(WeightH + i , 0.f,  sizeof(real));
         }
         for (int i = 0; i < vocab_size; i++) {
             WeightH[i] = 0.5f;
@@ -1112,6 +1112,7 @@ void Train_CBOWBasedNS() {
     long long tot;
     wchar_t ch[10];
     char buf[10], pos;
+
     real *vec = (real*)calloc(hidden_size, sizeof(real));
 
     if (read_vocab_file[0] != 0) {
@@ -1166,6 +1167,7 @@ void Train_CBOWBasedNS() {
         real *outputMd = (real *) _mm_malloc((1 + negative) * hidden_size * sizeof(real), 64);
 //        real * corrM = (real *) _mm_malloc((1 + negative) * batch_size * sizeof(real), 64);
         real *corrM = (real *) _mm_malloc((1 + negative) * sizeof(real), 64);
+        real *weightM = (real *) _mm_malloc(batch_size * sizeof(real),64);
 //        real * cbowM = (real *) _mm_malloc(hidden_size * sizeof(real),64);
         real cbowM[hidden_size] __attribute__((aligned(64)));
         int inputs[2 * window + 1] __attribute__((aligned(64))); //?
@@ -1285,6 +1287,11 @@ void Train_CBOWBasedNS() {
 
                 // fetch input sub model
                 int input_start = b * batch_size;
+                //debug
+                if(input_start!=0){
+                    printf("input: %d\n",input_start);
+                    printf("input: %d\n",input_start);
+                }
                 int input_size = min(batch_size, num_inputs - input_start);
                 for (int i = 0; i < input_size; i++) {
                     memcpy(inputM + i * hidden_size, Wih + inputs[input_start + i] * hidden_size,
@@ -1295,6 +1302,12 @@ void Train_CBOWBasedNS() {
                 for (int i = 0; i < output_size; i++) {
                     memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
                            hidden_size * sizeof(real));
+                }
+                if(cwe_type==2){
+                    for (int i = 0; i < input_size; i++) {
+                        memcpy(weightM + i , WeightH + inputs[input_start + i] ,
+                               sizeof(real));
+                    }
                 }
 
 
@@ -1316,6 +1329,21 @@ void Train_CBOWBasedNS() {
                                 char_list_cnt++;
                             }
                             VectorMul(neu1char,hidden_size,0.5f,0);
+                        }
+
+                        VectorAdd(cbowM,hidden_size,neu1char,0,1.0f);
+                    }
+                    if(cwe_type==2){
+                        last_word = inputs[j];
+                        for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
+                        VectorAdd(neu1char,hidden_size,Wih,last_word,weightM[j]);
+                        if (cwe_type && vocab[last_word].character_size) {
+                            for (c = 0; c < vocab[last_word].character_size; c++) {
+                                charv_id = vocab[last_word].character[c];
+                                VectorAdd(neu1char,hidden_size,charv,charv_id,((1.0f - weightM[j]) / vocab[last_word].character_size));
+                                charv_id_list[char_list_cnt] = charv_id;
+                                char_list_cnt++;
+                            }
                         }
 
                         VectorAdd(cbowM,hidden_size,neu1char,0,1.0f);
@@ -1359,12 +1387,29 @@ void Train_CBOWBasedNS() {
                 for (int i = 0; i < input_size; i++) {
 //                    int src = i * hidden_size;
 //                    int des = inputs[input_start + i] * hidden_size;
+
                     if(cwe_type==0)
                         VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
                     if(cwe_type==1){
                         VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
                             VectorAddBW(charv,hidden_size,cbowM,vocab[inputs[i]].character[j],1.0f);
+                        }
+                    }
+                    if(cwe_type==2){
+                        double sum_a = 0.0;
+                        for(int d = 0;d<hidden_size;d++){
+                            sum_a += inputM[i*hidden_size+d] * cbowM[d];
+                            for(int c = 0;c<vocab[inputs[i]].character_size;c++){
+                                sum_a-=(charv[d + vocab[inputs[i]].character[c] * hidden_size] * cbowM[d] ) / (vocab[inputs[i]].character_size);
+                            }
+                        }
+                        if(sum_a > 10000000)
+                            printf("%lld\n",sum_a);
+                        WeightH[inputs[i]] += sum_a/hidden_size;
+                        VectorAddBW(Wih,hidden_size,cbowM,inputs[i], weightM[i]);
+                        for(int j = 0;j<vocab[inputs[i]].character_size;j++){
+                            VectorAddBW(charv,hidden_size,cbowM,vocab[inputs[i]].character[j],1.0f-weightM[i]);
                         }
                     }
                 }
@@ -2165,7 +2210,7 @@ void Train_DSENS() {
         while (1) {
             if (word_count - last_word_count > 10000) {
                 ulonglong diff = word_count - last_word_count;
-#pragma omp atomic
+                #pragma omp atomic
                 word_count_actual += diff;
 
                 last_word_count = word_count;
@@ -2342,12 +2387,12 @@ void Train_DSENS() {
                 for (int j = 0; j < input_size; j++) {
                     last_word = inputs[j];
                     for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
-                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size] * weightM[j];
+                    for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size] * weightM[last_word];
                     if (cwe_type && vocab[last_word].character_size) {
                         for (c = 0; c < vocab[last_word].character_size; c++) {
                             charv_id = vocab[last_word].character[c];
                             for (d = 0; d < hidden_size; d++)
-                                neu1char[d] += (charv[d + charv_id * hidden_size] / vocab[last_word].character_size) * (1.0f - weightM[j]);
+                                neu1char[d] += (charv[d + charv_id * hidden_size] / vocab[last_word].character_size) * (1.0f - weightM[last_word]);
                             charv_id_list[char_list_cnt] = charv_id;
                             char_list_cnt++;
                         }
@@ -2455,16 +2500,6 @@ void Train_DSENS() {
                     sum_a /= count;
                     sum_a+=sum_b;
                     sum_a/=hidden_size;
-//                    if(sum_a>1.f){
-//                        sum_a = 1.f;
-//                    }else if(sum_a < -1.f){
-//                        sum_a = -1.f;
-//                    }
-//                    printf("debug 3\n");
-//                    if(WeightH[inputs[input_start + i]] > max_a){
-//                        max_a = WeightH[inputs[input_start + i]];
-//                        printf("%lf\n",max_a);
-//                    }
                     WeightH[inputs[input_start + i]] += sum_a;
 //                    printf("debug 4\n");
                     sum_a=0.f;
@@ -2657,7 +2692,7 @@ int main(int argc, char **argv) {
     printf("stream from disk: %d\n", disk);
     printf("starting training using file: %s\n\n", train_file);
 
-    if((cwe_type==0||cwe_type==1) && cbow_type == 1) {
+    if((cwe_type==0||cwe_type==1||cwe_type==2) && cbow_type == 1) {
         printf("model: CBOWNS\n");
         character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         Train_CBOWBasedNS();
