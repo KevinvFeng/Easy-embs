@@ -49,16 +49,19 @@ typedef unsigned long long ulonglong;
 //};
 struct vocab_word {
     long long cn;
-    int *point, *character, character_size, *character_emb_select;
+    int *point, character_size, *character_emb_select;
+    unsigned int *character;
 //    char *word, *code, codelen;
     char *word;
-
     /*
      * character[i]   : Unicode(the i-th character in the word) - MIN_CHINESE
      * character_size : the length of the word
                         (not equal to the length of string due to UTF-8 encoding)
      * character_emb_select[i][j] : count character[i] select the j-th cluster
      */
+};
+struct vocab_substring{
+    char *substring;
 };
 
 class sequence {
@@ -83,6 +86,7 @@ int binary = 0, debug_mode = 2;
 bool disk = false;
 int negative = 5, min_count = 5, num_threads = 12, min_reduce = 1, iter = 5, window = 5, batch_size = 11;
 int vocab_max_size = 1000, vocab_size = 0, hidden_size = 100;
+int vocab_substring_max_size = 1000, substring_size = 0;
 ulonglong train_words = 0, file_size = 0;
 real alpha = 0.025f, sample = 1e-3f;
 const real EXP_RESOLUTION = EXP_TABLE_SIZE / (MAX_EXP * 2.0f);
@@ -95,12 +99,15 @@ const int table_size = 1e8;
 int cwe_type = 0;
 int cbow_type = 0;
 struct vocab_word *vocab = NULL;
+struct vocab_substring *substrings = NULL;
 int *vocab_hash = NULL;
+int *substring_hash = NULL;
 int *table = NULL;
 real *Wih = NULL, *Woh = NULL, *expTable = NULL;
 real *WeightH = NULL;
 real *charv;
 long long character_size = 0;
+int lang = 0;
 void InitUnigramTable() {
     table = (int *) _mm_malloc(table_size * sizeof(int), 64);
 
@@ -159,7 +166,13 @@ int GetWordHash(char *word) {
     hash = hash % vocab_hash_size;
     return hash;
 }
-
+int GetSubstringHash(char *substring) {
+    uint hash = 0;
+    for (int i = 0; i< strlen(substring); i++)
+        hash = hash * 257 + substring[i];
+    hash = hash % vocab_hash_size;
+    return hash;
+}
 // Returns position of a word in the vocabulary; if the word is not found, returns -1
 int SearchVocab(char *word) {
     int hash = GetWordHash(word);
@@ -172,7 +185,17 @@ int SearchVocab(char *word) {
     }
     return -1;
 }
-
+int SearchSubstring(char *substring) {
+    int hash = GetSubstringHash(substring);
+    while (1) {
+        if (substring_hash[hash] == -1)
+            return -1;
+        if (!strcmp(substring, substrings[substring_hash[hash]].substring))
+            return substring_hash[hash];
+        hash = (hash + 1) % vocab_hash_size;
+    }
+    return -1;
+}
 // Reads a word and returns its index in the vocabulary
 int ReadWordIndex(FILE *fin) {
     char word[MAX_STRING];
@@ -202,7 +225,24 @@ int ReadWordIndex(FILE *fin) {
 //    vocab_hash[hash] = vocab_size - 1;
 //    return vocab_size - 1;
 //}
-
+int AddSubstringToVocab(char *substring) {
+    int hash, length = strlen(substring) + 1;
+    if (length > MAX_STRING)
+        length = MAX_STRING;
+    substrings[substring_size].substring = (char *) calloc(length, sizeof(char));
+    strcpy(substrings[substring_size].substring, substring);
+    substring_size++;
+    // Reallocate memory if needed
+    if (substring_size + 2 >= vocab_substring_max_size) {
+        vocab_substring_max_size += 1000;
+        substrings = (struct vocab_substring *) realloc(substrings, vocab_substring_max_size * sizeof(struct vocab_substring));
+    }
+    hash = GetSubstringHash(substring);
+    while (vocab_hash[hash] != -1)
+        hash = (hash + 1) % vocab_hash_size;
+    substring_hash[hash] = substring_size - 1;
+    return substring_size - 1;
+}
 int AddWordToVocab(char *word, int is_non_comp) {
     int hash, length = strlen(word) + 1;
     wchar_t wstr[MAX_STRING];
@@ -223,21 +263,41 @@ int AddWordToVocab(char *word, int is_non_comp) {
         hash = (hash + 1) % vocab_hash_size;
     vocab_hash[hash] = vocab_size - 1;
     if (!cwe_type || is_non_comp) return vocab_size - 1;
-    len = mbstowcs(wstr, word, MAX_STRING);
-//    printf("word : %ls\n",wstr);
-//    printf("len: %d\n",len);
-    for (i = 0; i < len; i++)
-        if (wstr[i] < MIN_CHINESE || wstr[i] > MAX_CHINESE) {
-            vocab[vocab_size - 1].character = 0;
-            vocab[vocab_size - 1].character_size = 0;
-            return vocab_size - 1;
+    //Chinese character
+    if (cwe_type>=0 && lang==0){
+        len = mbstowcs(wstr, word, MAX_STRING);
+        for (i = 0; i < len; i++)
+            if (wstr[i] < MIN_CHINESE || wstr[i] > MAX_CHINESE) {
+                vocab[vocab_size - 1].character = 0;
+                vocab[vocab_size - 1].character_size = 0;
+                return vocab_size - 1;
+            }
+        vocab[vocab_size - 1].character =(unsigned int*) calloc(len, sizeof(unsigned int));
+        vocab[vocab_size - 1].character_size = len;
+        for (i = 0; i < len; i++) {
+            //character
+            vocab[vocab_size - 1].character[i] = wstr[i] - MIN_CHINESE;
         }
-    vocab[vocab_size - 1].character =(int*) calloc(len, sizeof(int));
-    vocab[vocab_size - 1].character_size = len;
-    for (i = 0; i < len; i++) {
-        //character
-        vocab[vocab_size - 1].character[i] = wstr[i] - MIN_CHINESE;
+    }else if(cwe_type >= 0 && lang==1){
+//        printf("%s,\t%d\n",word,length);
+        char word_plus[20+2] = "<";
+        strcat(word_plus,word);
+        strcat(word_plus,">");
+//        printf("%s\n",word_plus);
+        int min_size = min(7,length-1);
+        char ss[5];
+        for(int i = 0; i < min_size; i++){
+            strncpy(ss,word_plus+i,4);
+            ss[4] = '\0';
+//            printf("%s\t",ss);
+            int index = SearchSubstring(ss);
+            if (index == -1) {
+                int a = AddSubstringToVocab(word);
+            }
+        }
+//        printf("\n");
     }
+
     return vocab_size - 1;
 }
 // Used later for sorting by word counts
@@ -322,7 +382,7 @@ void LearnVocabFromTrainFile() {
     char word[MAX_STRING];
 
     memset(vocab_hash, -1, vocab_hash_size * sizeof(int));
-
+    memset(substring_hash, -1, vocab_hash_size * sizeof(int));
     FILE *fin = fopen(train_file, "rb");
     if (fin == NULL) {
         printf("ERROR: training data file not found!\n");
@@ -331,6 +391,7 @@ void LearnVocabFromTrainFile() {
 
     train_words = 0;
     vocab_size = 0;
+    substring_size = 0;
     AddWordToVocab((char *) "</s>",0);
     if (strlen(non_comp)) LearnNonCompWord();
     while (1) {
@@ -375,9 +436,11 @@ void ReadVocab() {
         exit(1);
     }
     memset(vocab_hash, -1, vocab_hash_size * sizeof(int));
+    memset(substring_hash, -1, vocab_hash_size * sizeof(int));
 
     char c;
     vocab_size = 0;
+    substring_size = 0;
     while (1) {
         ReadWord(word, fin);
         if (feof(fin))
@@ -1901,6 +1964,8 @@ int main(int argc, char **argv) {
         printf("\t\tSet cwe type; default is 1(CBOW), 0(SG)\n");
         printf("\t-cwe-type <int>\n");
         printf("\t\tSet cwe type; default is 1(CWE), 0(word2vec)\n");
+        printf("\t-lang <int>\n");
+        printf("\t\tSet language; default is 0(Chinese), 1(Other)\n");
         printf("\t-binary <int>\n");
         printf("\t\tSave the resulting vectors in binary moded; default is 0 (off)\n");
         printf("\t-save-vocab <file>\n");
@@ -1935,6 +2000,8 @@ int main(int argc, char **argv) {
         cbow_type = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-cwe-type", argc, argv)) > 0)
         cwe_type = atoi(argv[i + 1]);
+    if ((i = ArgPos((char *)"-lang", argc, argv)) > 0)
+        lang = atoi(argv[i + 1]);
     if ((i = ArgPos((char *) "-binary", argc, argv)) > 0)
         binary = atoi(argv[i + 1]);
     if ((i = ArgPos((char *) "-alpha", argc, argv)) > 0)
@@ -1959,7 +2026,9 @@ int main(int argc, char **argv) {
         disk = true;
 
     vocab = (struct vocab_word *) calloc(vocab_max_size, sizeof(struct vocab_word));
+    substrings = (struct vocab_substring *) calloc(vocab_substring_max_size, sizeof(struct vocab_substring));
     vocab_hash = (int *) _mm_malloc(vocab_hash_size * sizeof(int), 64);
+    substring_hash = (int *) _mm_malloc(vocab_hash_size * sizeof(int), 64);
     expTable = (real *) _mm_malloc((EXP_TABLE_SIZE + 1) * sizeof(real), 64);
     for (i = 0; i < EXP_TABLE_SIZE + 1; i++) {
         expTable[i] = exp((i / (real) EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
