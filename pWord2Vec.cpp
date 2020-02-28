@@ -286,18 +286,18 @@ int AddWordToVocab(char *word, int is_non_comp) {
 //        printf("%s\n",word_plus);
         int min_size = min(7,length-1);
         char ss[5];
+        vocab[vocab_size - 1].character =(unsigned int*) calloc(min_size, sizeof(unsigned int));
+        vocab[vocab_size - 1].character_size = min_size;
         for(int i = 0; i < min_size; i++){
             strncpy(ss,word_plus+i,4);
             ss[4] = '\0';
-//            printf("%s\t",ss);
             int index = SearchSubstring(ss);
             if (index == -1) {
-                int a = AddSubstringToVocab(word);
+                index = AddSubstringToVocab(word);
             }
+            vocab[vocab_size - 1].character[i] = index;
         }
-//        printf("\n");
     }
-
     return vocab_size - 1;
 }
 // Used later for sorting by word counts
@@ -472,7 +472,7 @@ void InitNet() {
     real *vec = (real*)calloc(hidden_size, sizeof(real)), len;
     wchar_t buf[10];
     FILE *file;
-
+    character_size = substring_size;
     Wih = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
     Woh = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
     WeightH = (real *) _mm_malloc(vocab_size * sizeof(real),64);
@@ -1207,8 +1207,6 @@ void Train_CBOWBasedNS() {
         ulonglong word_count = 0, last_word_count = 0; //this thread word count
         int sentence_length = 0, sentence_position = 0; //sentence?
         int sen[MAX_SENTENCE_LENGTH] __attribute__((aligned(64)));
-
-
 
         //load stream
         FILE *fin = fopen(train_file, "rb"); //open text file
