@@ -472,7 +472,8 @@ void InitNet() {
     real *vec = (real*)calloc(hidden_size, sizeof(real)), len;
     wchar_t buf[10];
     FILE *file;
-    character_size = substring_size;
+    if(lang == 1)
+        character_size = substring_size;
     Wih = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
     Woh = (real *) _mm_malloc(vocab_size * hidden_size * sizeof(real), 64);
     WeightH = (real *) _mm_malloc(vocab_size * sizeof(real),64);
@@ -1149,14 +1150,39 @@ void MatrixAdd(real matrix0[],int row0,int col0,real matrix1[]){
         }
     }
 }
+void VectorClear(real vector[], int size){
+    for(int i = 0; i< size;i++){
+        vector[i] = 0;
+    }
+}
 void VectorAdd(real vector0[], int col0, real matrix1[], int matrix1_start, real alpha){
     for(int i = 0;i<col0;i++){
         vector0[i] += alpha * matrix1[matrix1_start*col0+i];
     }
 }
-void VectorAddBW(real matrix0[], int col0, real vector1[], int matrix0_start, real alpha){
+void VectorAddBW(real vector1[], int col0, real matrix0[], int matrix0_start, real alpha){
     for(int i = 0;i<col0;i++){
         matrix0[matrix0_start*col0+i] += alpha * vector1[i];
+    }
+}
+void VectorAddAlphaBW(real vector1[], int col0, real matrix0[], int matrix0_start, real alpha[],int index){
+    for(int i = 0;i<col0;i++){
+        alpha[index]+=matrix0[matrix0_start*col0+i]*vector1[i]/col0;
+    }
+}
+void VectorMinus(real vector0[], int col0, real matrix1[], int matrix1_start, real alpha){
+    for(int i = 0;i<col0;i++){
+        vector0[i] -= alpha * matrix1[matrix1_start*col0+i];
+    }
+}
+void VectorMinusBW(real vector1[], int col0, real matrix0[], int matrix0_start, real alpha){
+    for(int i = 0;i<col0;i++){
+        matrix0[matrix0_start*col0+i] -= alpha * vector1[i];
+    }
+}
+void VectorMinusAlphaBW(real vector1[], int col0, real matrix0[], int matrix0_start, real alpha[],int index){
+    for(int i = 0;i<col0;i++){
+        alpha[index]-=matrix0[matrix0_start*col0+i]*vector1[i]/col0;
     }
 }
 void VectorMul(real matrix0[], int col0, real scale, int matrix0_start){
@@ -1397,7 +1423,7 @@ void Train_CBOWBasedNS() {
                     if(cwe_type==2){
                         last_word = inputs[j];
                         for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
-                        VectorAdd(neu1char,hidden_size,Wih,last_word,weightM[j]);
+                        VectorAdd(cbowM,hidden_size,Wih,last_word,weightM[j]);
                         if (cwe_type && vocab[last_word].character_size) {
                             for (c = 0; c < vocab[last_word].character_size; c++) {
                                 charv_id = vocab[last_word].character[c];
@@ -1450,17 +1476,17 @@ void Train_CBOWBasedNS() {
 //                    int des = inputs[input_start + i] * hidden_size;
 
                     if(cwe_type==0)
-                        VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
+                        VectorAddBW(cbowM,hidden_size,Wih,inputs[input_start + i], 1.0f);
                     if(cwe_type==1){
-                        VectorAddBW(Wih,hidden_size,cbowM,inputs[input_start + i], 1.0f);
+                        VectorAddBW(cbowM,hidden_size,Wih,inputs[input_start + i], 1.0f);
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
-                            VectorAddBW(charv,hidden_size,cbowM,vocab[inputs[i]].character[j],1.0f);
+                            VectorAddBW(cbowM,hidden_size,charv,vocab[inputs[i]].character[j],1.0f);
                         }
                     }
                     if(cwe_type==2){
                         double sum_a = 0.0;
                         for(int d = 0;d<hidden_size;d++){
-                            sum_a += inputM[i*hidden_size+d] * cbowM[d];
+//                            sum_a += inputM[i*hidden_size+d] * cbowM[d];
                             for(int c = 0;c<vocab[inputs[i]].character_size;c++){
                                 sum_a-=(charv[d + vocab[inputs[i]].character[c] * hidden_size] * cbowM[d] ) / (vocab[inputs[i]].character_size);
                             }
@@ -1468,9 +1494,14 @@ void Train_CBOWBasedNS() {
                         if(sum_a > 10000000)
                             printf("%lld\n",sum_a);
                         WeightH[inputs[i]] += sum_a/hidden_size;
-                        VectorAddBW(Wih,hidden_size,cbowM,inputs[i], weightM[i]);
+//                        VectorAddBW(cbowM,hidden_size,neu1char,0,1.0f);
+                        VectorAddAlphaBW(cbowM,hidden_size,inputM,i,WeightH,inputs[i]);
+//                        for(int c=0;c<vocab[inputs[i]].character_size;c++){
+//                            VectorAddAlphaBW(neu1char,hidden_size,charv,vocab[inputs[i]].character[c],WeightH,inputs[i]);
+//                        }
+                        VectorAddBW(cbowM,hidden_size,Wih,inputs[i], weightM[i]);
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
-                            VectorAddBW(charv,hidden_size,cbowM,vocab[inputs[i]].character[j],1.0f-weightM[i]);
+                            VectorAddBW(cbowM,hidden_size,charv,vocab[inputs[i]].character[j],(1.0f - weightM[i]) );
                         }
                     }
                 }
