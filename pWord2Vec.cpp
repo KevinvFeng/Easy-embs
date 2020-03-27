@@ -32,6 +32,7 @@
 using namespace std;
 
 #define MAX_STRING 100
+#define MAX_SUBSTRING = 100;
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
 #define MAX_SENTENCE_LENGTH 1000
@@ -96,7 +97,7 @@ char non_comp[MAX_STRING], char_init[MAX_STRING];
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 const int table_size = 1e8;
-int cwe_type = 0;
+int model_type = 0;
 int cbow_type = 0;
 struct vocab_word *vocab = NULL;
 struct vocab_substring *substrings = NULL;
@@ -106,6 +107,12 @@ int *table = NULL;
 real *Wih = NULL, *Woh = NULL, *expTable = NULL;
 real *WeightH = NULL;
 real *charv;
+
+//SEA
+real *q;
+real *k;
+real *v;
+
 long long character_size = 0;
 int lang = 0;
 void InitUnigramTable() {
@@ -206,25 +213,6 @@ int ReadWordIndex(FILE *fin) {
 }
 
 // Adds a word to the vocabulary
-//int AddWordToVocab(char *word) {
-//    int hash, length = strlen(word) + 1;
-//    if (length > MAX_STRING)
-//        length = MAX_STRING;
-//    vocab[vocab_size].word = (char *) calloc(length, sizeof(char));
-//    strcpy(vocab[vocab_size].word, word);
-//    vocab[vocab_size].cn = 0;
-//    vocab_size++;
-//    // Reallocate memory if needed
-//    if (vocab_size + 2 >= vocab_max_size) {
-//        vocab_max_size += 1000;
-//        vocab = (struct vocab_word *) realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
-//    }
-//    hash = GetWordHash(word);
-//    while (vocab_hash[hash] != -1)
-//        hash = (hash + 1) % vocab_hash_size;
-//    vocab_hash[hash] = vocab_size - 1;
-//    return vocab_size - 1;
-//}
 int AddSubstringToVocab(char *substring) {
     int hash, length = strlen(substring) + 1;
     if (length > MAX_STRING)
@@ -262,9 +250,9 @@ int AddWordToVocab(char *word, int is_non_comp) {
     while (vocab_hash[hash] != -1)
         hash = (hash + 1) % vocab_hash_size;
     vocab_hash[hash] = vocab_size - 1;
-    if (!cwe_type || is_non_comp) return vocab_size - 1;
+    if (!model_type || is_non_comp) return vocab_size - 1;
     //Chinese character
-    if (cwe_type>=0 && lang==0){
+    if (model_type>=0 && lang==0){
         len = mbstowcs(wstr, word, MAX_STRING);
         for (i = 0; i < len; i++)
             if (wstr[i] < MIN_CHINESE || wstr[i] > MAX_CHINESE) {
@@ -278,7 +266,7 @@ int AddWordToVocab(char *word, int is_non_comp) {
             //character
             vocab[vocab_size - 1].character[i] = wstr[i] - MIN_CHINESE;
         }
-    }else if(cwe_type >= 0 && lang==1){
+    }else if(model_type >= 0 && lang==1){
 //        printf("%s,\t%d\n",word,length);
         char word_plus[20+2] = "<";
         strcat(word_plus,word);
@@ -495,7 +483,7 @@ void InitNet() {
         Wih[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
     }
 
-    if (cwe_type==1) {
+    if (model_type==1) {
         printf("char!\ncharactersize: %lld\n",character_size);
         a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
         if (charv == NULL) {printf("Memory allocation failed\n"); exit(1);}
@@ -503,7 +491,7 @@ void InitNet() {
             next_random = next_random * (unsigned long long)25214903917 + 11;
             charv[a] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / hidden_size;
         }
-    }else if(cwe_type==2){
+    }else if(model_type==2){
         a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
         if (charv == NULL) {printf("Memory allocation failed\n"); exit(1);}
         for (a = 0; a < (long long)character_size * hidden_size; a++) {
@@ -518,6 +506,41 @@ void InitNet() {
             WeightH[i] = 0.5f;
         }
         printf("initNet()\n");
+    }else if(model_type==3){
+        q = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
+        k = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
+        v = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
+
+
+        if (!q || !k || !v) {
+            printf("Memory allocation failed\n");
+            exit(1);
+        }
+
+        #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
+        for (int i = 0; i < hidden_size; i++) {
+            memset(q + i * hidden_size, 0.f, hidden_size * sizeof(real));
+            memset(k + i * hidden_size, 0.f, hidden_size * sizeof(real));
+            memset(v + i * hidden_size, 0.f, hidden_size * sizeof(real));
+        }
+
+
+        // initialization
+        ulonglong next_random = 1;
+        for (int i = 0; i < hidden_size * hidden_size; i++) {
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+        }
+        next_random = 2;
+        for (int i = 0; i < hidden_size * hidden_size; i++) {
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            k[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+        }
+        next_random = 3;
+        for (int i = 0; i < hidden_size * hidden_size; i++) {
+            next_random = next_random * (ulonglong) 25214903917 + 11;
+            q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+        }
     }
 
 }
@@ -1260,6 +1283,23 @@ void Train_CBOWBasedNS() {
         int inputs[2 * window + 1] __attribute__((aligned(64))); //?
         sequence outputs(1 + negative);
 
+        if(model_type==3){
+            real *q_word;
+            real *k_substrings;
+            real *v_substrings;
+            q_word = (real *) _mm_malloc(hidden_size*sizeof(real),64);
+            k_substrings = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
+            v_substrings = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
+            real *Input_ss = (real *) _mm_malloc_(MAX_SUBSTRING * hidden_size * sizeof(real),64);
+            real exp_att;
+            exp_att = (real *) _mm_malloc(MAX_SUBSTRING * sizeof(real),64);
+            if (!q_word || !k_substrings || !v_substrings || !Input_ss || !exp_att) {
+                printf("Memory allocation failed\n");
+                exit(1);
+            }
+        }
+
+
         #pragma omp barrier
 
         if (id == 0) {
@@ -1390,11 +1430,21 @@ void Train_CBOWBasedNS() {
                     memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
                            hidden_size * sizeof(real));
                 }
-                if(cwe_type==2){
+                if(model_type==2){
                     for (int i = 0; i < input_size; i++) {
                         memcpy(weightM + i , WeightH + inputs[input_start + i] ,
                                sizeof(real));
                     }
+                }
+                if(model_type==3){
+                    memset(q_word,0.f,hidden_size*sizeof(real));
+                    #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
+                    for(int i = 0; i < MAX_SUBSTRING; i++) {
+                        memset(k_substings + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                        memset(v_substings + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                        memset(exp_att + i, 0.f, sizeof(real));
+                    }
+
                 }
 
 
@@ -1402,13 +1452,13 @@ void Train_CBOWBasedNS() {
 //                matrixAdd()
 
                 for (int j = 0; j < input_size; j++) {
-                    if(cwe_type==0)
+                    if(model_type==0)
                         VectorAdd(cbowM,hidden_size,inputM,j,1.0f);
-                    if(cwe_type==1){
+                    if(model_type==1){
                         last_word = inputs[j];
                         for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
                         VectorAdd(neu1char,hidden_size,Wih,last_word,1.0f);
-                        if (cwe_type && vocab[last_word].character_size) {
+                        if (model_type && vocab[last_word].character_size) {
                             for (c = 0; c < vocab[last_word].character_size; c++) {
                                 charv_id = vocab[last_word].character[c];
                                 VectorAdd(neu1char,hidden_size,charv,charv_id,(1.0f / vocab[last_word].character_size));
@@ -1417,14 +1467,13 @@ void Train_CBOWBasedNS() {
                             }
                             VectorMul(neu1char,hidden_size,0.5f,0);
                         }
-
                         VectorAdd(cbowM,hidden_size,neu1char,0,1.0f);
                     }
-                    if(cwe_type==2){
+                    if(model_type==2){
                         last_word = inputs[j];
                         for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
                         VectorAdd(cbowM,hidden_size,Wih,last_word,weightM[j]);
-                        if (cwe_type && vocab[last_word].character_size) {
+                        if ( && vocab[last_word].character_size) {
                             for (c = 0; c < vocab[last_word].character_size; c++) {
                                 charv_id = vocab[last_word].character[c];
                                 VectorAdd(neu1char,hidden_size,charv,charv_id,((1.0f - weightM[j]) / vocab[last_word].character_size));
@@ -1436,11 +1485,40 @@ void Train_CBOWBasedNS() {
                         VectorAdd(cbowM,hidden_size,neu1char,0,1.0f);
                     }
 
+                    // Attention forwad
+                    if(model_type==3){
+                        last_word = inputs[j];
+                        int_t ss_size = vocab[last_word].character_size;
+                        //TODO: q_word
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
+                                1.0f,Wih+hidden_size*last_word,hidden_size,q,hidden_size,q_word,hidden_size);
+                        memcpy(Input_substring,Wih+hidden_size*last_word,hidden_size * sizeof(real));
+                        for( int i = 1; i < ss_size;i++){
+                            charv_id = vocab[last_word].character[i]
+                            memcpy(Input_substring + i*hidden_size, charv + charv_id * hidden_size,
+                                   hidden_size * sizeof(real));
+                        }
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,
+                                1.0f,Input_substring,hidden_size,k,hidden_size,k_substring,hidden_size);
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,
+                                1.0f,Input_substring,hidden_size,v,hidden_size,v_substring,hidden_size);
+                        real su = 0.f;
+                        for( int i = 0; i < ss_size+1; i++){
+                            su += exp_att[i];
+                            exp_att[i] = exp(cblas_sdot(hidden_size,q_word,1,k_substring+i*hidden_size,1)/10);
+                        }
+                        for( int i = 0; i < ss_size+1; i++){
+                            exp_att[i] /= su;
+                        }
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
+                                1.0f,exp_att,hidden_size,v_substring,hidden_size,cbowM,hidden_size);
+                    }
+
                 }
                 for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
 
                 //output_size -> negative_size +1
-                //meta -> label
+                //meta -> labelmodel_type
                 // input_size -> N
                 // hidden_size -> D
                 // f -> inn
@@ -1475,15 +1553,15 @@ void Train_CBOWBasedNS() {
 //                    int src = i * hidden_size;
 //                    int des = inputs[input_start + i] * hidden_size;
 
-                    if(cwe_type==0)
+                    if(model_type==0)
                         VectorAddBW(cbowM,hidden_size,Wih,inputs[input_start + i], 1.0f);
-                    if(cwe_type==1){
+                    if(model_type==1){
                         VectorAddBW(cbowM,hidden_size,Wih,inputs[input_start + i], 1.0f);
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
                             VectorAddBW(cbowM,hidden_size,charv,vocab[inputs[i]].character[j],1.0f);
                         }
                     }
-                    if(cwe_type==2){
+                    if(model_type==2){
                         double sum_a = 0.0;
                         for(int d = 0;d<hidden_size;d++){
 //                            sum_a += inputM[i*hidden_size+d] * cbowM[d];
@@ -1730,7 +1808,7 @@ void Train_CWENS() {
 //                    printf("calc neu1char1\n");
                     for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
                     for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size];
-                    if (cwe_type && vocab[last_word].character_size) {
+                    if (model_type && vocab[last_word].character_size) {
                         for (c = 0; c < vocab[last_word].character_size; c++) {
                             charv_id = vocab[last_word].character[c];
                             for (d = 0; d < hidden_size; d++)
@@ -1781,7 +1859,7 @@ void Train_CWENS() {
                     last_word = inputs[j];
                     for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
                     for (c = 0; c < hidden_size; c++) neu1char[c] = Wih[c + last_word * hidden_size];
-                    if (cwe_type && vocab[last_word].character_size) {
+                    if (model_type && vocab[last_word].character_size) {
                         for (c = 0; c < vocab[last_word].character_size; c++) {
                             charv_id = vocab[last_word].character[c];
                             for (d = 0; d < hidden_size; d++)
@@ -1933,14 +2011,14 @@ void saveModel() {
                 fwrite(&Wih[a * hidden_size + b], sizeof(real), 1, fo);
         else{
             for (int b = 0; b < hidden_size; b++){
-                if(cwe_type==1){
+                if(model_type==1){
                     real tmp = 0.f;
                     for(int i = 0;i<vocab[a].character_size;i++){
                         tmp += charv[vocab[a].character[i] * hidden_size+b];
                     }
                     tmp /= vocab[a].character_size;
                     fprintf(fo, "%f ", (Wih[a * hidden_size + b]+tmp)/2);
-                }else if(cwe_type==2){
+                }else if(model_type==2){
                     real tmp = 0.f;
                     for(int i = 0;i<vocab[a].character_size;i++){
                         tmp += charv[vocab[a].character[i] * hidden_size+b];
@@ -1991,8 +2069,8 @@ int main(int argc, char **argv) {
 
         printf("\t-cbow <int>\n");
         printf("\t\tSet cwe type; default is 1(CBOW), 0(SG)\n");
-        printf("\t-cwe-type <int>\n");
-        printf("\t\tSet cwe type; default is 1(CWE), 0(word2vec)\n");
+        printf("\t-model-type <int>\n");
+        printf("\t\tSet cwe type; default is 1(CWE), 0(word2vec), 2(DSE), 3(SEA)\n");
         printf("\t-lang <int>\n");
         printf("\t\tSet language; default is 0(Chinese), 1(Other)\n");
         printf("\t-binary <int>\n");
@@ -2027,8 +2105,8 @@ int main(int argc, char **argv) {
         debug_mode = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0)
         cbow_type = atoi(argv[i + 1]);
-    if ((i = ArgPos((char *)"-cwe-type", argc, argv)) > 0)
-        cwe_type = atoi(argv[i + 1]);
+    if ((i = ArgPos((char *)"-model-type", argc, argv)) > 0)
+        model_type = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-lang", argc, argv)) > 0)
         lang = atoi(argv[i + 1]);
     if ((i = ArgPos((char *) "-binary", argc, argv)) > 0)
@@ -2074,11 +2152,11 @@ int main(int argc, char **argv) {
     printf("stream from disk: %d\n", disk);
     printf("starting training using file: %s\n\n", train_file);
 
-    if((cwe_type==0||cwe_type==1||cwe_type==2) && cbow_type == 1) {
+    if((model_type==0||model_type==1||model_type==2||model_type==3) && cbow_type == 1) {
         printf("model: CBOWNS\n");
         character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         Train_CBOWBasedNS();
-    }else if(cwe_type==0 && cbow_type == 0){
+    }else if(model_type==0 && cbow_type == 0){
         printf("model: SGNS\n");
         Train_SGNS();
     }
