@@ -32,7 +32,7 @@
 using namespace std;
 
 #define MAX_STRING 100
-#define MAX_SUBSTRING = 100;
+#define MAX_SUBSTRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
 #define MAX_SENTENCE_LENGTH 1000
@@ -1283,17 +1283,21 @@ void Train_CBOWBasedNS() {
         int inputs[2 * window + 1] __attribute__((aligned(64))); //?
         sequence outputs(1 + negative);
 
+
+        real *q_word;
+        real *k_substring;
+        real *v_substring;
+        real *exp_att;
+        real *Input_ss;
         if(model_type==3){
-            real *q_word;
-            real *k_substrings;
-            real *v_substrings;
+
             q_word = (real *) _mm_malloc(hidden_size*sizeof(real),64);
-            k_substrings = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
-            v_substrings = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
-            real *Input_ss = (real *) _mm_malloc_(MAX_SUBSTRING * hidden_size * sizeof(real),64);
-            real exp_att;
+            k_substring = (real *) _mm_malloc( MAX_SUBSTRING * hidden_size* sizeof(real),64);
+            v_substring = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
+            Input_ss = (real *) _mm_malloc(MAX_SUBSTRING * hidden_size * sizeof(real),64);
+
             exp_att = (real *) _mm_malloc(MAX_SUBSTRING * sizeof(real),64);
-            if (!q_word || !k_substrings || !v_substrings || !Input_ss || !exp_att) {
+            if (!q_word || !k_substring || !v_substring || !Input_ss || !exp_att) {
                 printf("Memory allocation failed\n");
                 exit(1);
             }
@@ -1440,8 +1444,8 @@ void Train_CBOWBasedNS() {
                     memset(q_word,0.f,hidden_size*sizeof(real));
                     #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
                     for(int i = 0; i < MAX_SUBSTRING; i++) {
-                        memset(k_substings + i * hidden_size, 0.f, hidden_size * sizeof(real));
-                        memset(v_substings + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                        memset(k_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                        memset(v_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
                         memset(exp_att + i, 0.f, sizeof(real));
                     }
 
@@ -1473,7 +1477,7 @@ void Train_CBOWBasedNS() {
                         last_word = inputs[j];
                         for (c = 0; c < hidden_size; c++) neu1char[c] = 0;
                         VectorAdd(cbowM,hidden_size,Wih,last_word,weightM[j]);
-                        if ( && vocab[last_word].character_size) {
+                        if (model_type && vocab[last_word].character_size) {
                             for (c = 0; c < vocab[last_word].character_size; c++) {
                                 charv_id = vocab[last_word].character[c];
                                 VectorAdd(neu1char,hidden_size,charv,charv_id,((1.0f - weightM[j]) / vocab[last_word].character_size));
@@ -1488,20 +1492,21 @@ void Train_CBOWBasedNS() {
                     // Attention forwad
                     if(model_type==3){
                         last_word = inputs[j];
-                        int_t ss_size = vocab[last_word].character_size;
+                        int ss_size = vocab[last_word].character_size;
                         //TODO: q_word
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
-                                1.0f,Wih+hidden_size*last_word,hidden_size,q,hidden_size,q_word,hidden_size);
-                        memcpy(Input_substring,Wih+hidden_size*last_word,hidden_size * sizeof(real));
+                                1.0f,Wih+hidden_size*last_word,hidden_size,q,hidden_size,0.0f,q_word,hidden_size);
+
+                        memcpy(Input_ss,Wih+hidden_size*last_word,hidden_size * sizeof(real));
                         for( int i = 1; i < ss_size;i++){
-                            charv_id = vocab[last_word].character[i]
-                            memcpy(Input_substring + i*hidden_size, charv + charv_id * hidden_size,
+                            charv_id = vocab[last_word].character[i];
+                            memcpy(Input_ss + i*hidden_size, charv + charv_id * hidden_size,
                                    hidden_size * sizeof(real));
                         }
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,
-                                1.0f,Input_substring,hidden_size,k,hidden_size,k_substring,hidden_size);
+                                1.0f,Input_ss,hidden_size,k,hidden_size,0.0f,k_substring,hidden_size);
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,
-                                1.0f,Input_substring,hidden_size,v,hidden_size,v_substring,hidden_size);
+                                1.0f,Input_ss,hidden_size,v,hidden_size,0.0f,v_substring,hidden_size);
                         real su = 0.f;
                         for( int i = 0; i < ss_size+1; i++){
                             su += exp_att[i];
@@ -1511,7 +1516,7 @@ void Train_CBOWBasedNS() {
                             exp_att[i] /= su;
                         }
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
-                                1.0f,exp_att,hidden_size,v_substring,hidden_size,cbowM,hidden_size);
+                                1.0f,exp_att,hidden_size,v_substring,hidden_size,0.0f,cbowM,hidden_size);
                     }
 
                 }
