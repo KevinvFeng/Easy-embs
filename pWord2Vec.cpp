@@ -1213,9 +1213,45 @@ void VectorMul(real matrix0[], int col0, real scale, int matrix0_start){
         matrix0[matrix0_start*col0+i] *= scale;
     }
 }
-void VectorMul(real vector0[], int col0, real matrix1[], int matrix0_start){
-    for(int i = 0;i<col0;i++){
-        vector0[i] *= matrix1[matrix0_start*col0+i];
+void VectorMul(real vector0[], int col0, real matrix1[], int matrix0_start) {
+    for (int i = 0; i < col0; i++) {
+        vector0[i] *= matrix1[matrix0_start * col0 + i];
+    }
+}
+void MatrixMulBW(real X[],int X_row,int X_col,real gradient[],real W[],W_col){
+    for(int i = 0; i < X_row; i++){
+        for(int j = 0; j < X_col; j++){
+            X[j + i * X_col] += cblas_sdot(X_col, gradient+i*X_col,1,W+j*W_col,1);
+        }
+    }
+}
+void SoftmaxBW(real dVec[], real Vec[],int size){
+    double e_sum = 0.0;
+    for(int i = 0; i < size;i++){
+        e_sum += exp(Vec[i])
+    }
+    for(int i = 0; i<size;i++){
+        for(int j = 0;j<size;j++){
+            if(i==j){
+                dVec[i]+=exp(Vec[i])*(e_sum-exp(Vec[i])) / (e_sum*e_sum);
+            }else{
+                dVec[i]-= exp(Vec[i])*exp(Vec[j])/ (e_sum * e_sum);
+            }
+        }
+    }
+}
+void VectorMatrixDotBW(real dA[],real gradient[], real B[],int row,int col,float alpha){
+    for(int i=0;i<row;i++){
+        for(int j = 0;j<col;j++){
+            dA[j] += alpha * gradient[i]*B[j + i*col];
+        }
+    }
+}
+void MatrixVectorDotBW(real dA[], real gradient[], real B[], int row, int col, float alpha){
+    for(int i = 0;i<row;i++){
+        for(int j = 0;j<col;j++){
+            da[j+i*col] += alpha * gradient[i] * B[j];
+        }
     }
 }
 void Train_CBOWBasedNS() {
@@ -1494,12 +1530,16 @@ void Train_CBOWBasedNS() {
                         last_word = inputs[j];
                         int ss_size = vocab[last_word].character_size;
                         //TODO: q_word
+
+                        //inputs->q_word
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
                                 1.0f,Wih+hidden_size*last_word,hidden_size,q,hidden_size,0.0f,q_word,hidden_size);
 
+                        //inputs -> k_substring
+                        //inputs -> v_substring
                         memcpy(Input_ss,Wih+hidden_size*last_word,hidden_size * sizeof(real));
-                        for( int i = 1; i < ss_size;i++){
-                            charv_id = vocab[last_word].character[i];
+                        for( int i = 1; i < ss_size+1;i++){
+                            charv_id = vocab[last_word].character[i-1];
                             memcpy(Input_ss + i*hidden_size, charv + charv_id * hidden_size,
                                    hidden_size * sizeof(real));
                         }
@@ -1508,13 +1548,21 @@ void Train_CBOWBasedNS() {
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,
                                 1.0f,Input_ss,hidden_size,v,hidden_size,0.0f,v_substring,hidden_size);
                         real su = 0.f;
+
+                        //q_word,k_substring -> weights
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
+                                1.0f, q_word,hidden_size,k_substring,hidden_size,0.0f,exp_att,hidden_size);
+                        //softmax(weights)
                         for( int i = 0; i < ss_size+1; i++){
+                            exp_att[i] = exp(exp_att[i]/10);
                             su += exp_att[i];
-                            exp_att[i] = exp(cblas_sdot(hidden_size,q_word,1,k_substring+i*hidden_size,1)/10);
                         }
                         for( int i = 0; i < ss_size+1; i++){
                             exp_att[i] /= su;
                         }
+//                        for( int i = 0; i < ss_size+1; i++){
+//                            cbowM[i] += exp_att[i] * v_substring[i];
+//                        }
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,
                                 1.0f,exp_att,hidden_size,v_substring,hidden_size,0.0f,cbowM,hidden_size);
                     }
@@ -1586,6 +1634,113 @@ void Train_CBOWBasedNS() {
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
                             VectorAddBW(cbowM,hidden_size,charv,vocab[inputs[i]].character[j],(1.0f - weightM[i]) );
                         }
+                    }
+                    if(model_type == 3){
+
+                        //initial dInput_ss
+                        real *dInput_ss = (real *) _mm_malloc(MAX_SUBSTRING * hidden_size*sizeof(real),64);
+                        for( int c = 0; c<MAX_SUBSTRING;c++){
+                            memset(dInput_ss + c * hidden_size, 0.f, hidden_size * sizeof(real));
+                        }
+
+                        int ss_size = vocab[inputs[i]].character_size;
+                        real *dV_ss = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
+                        for( int c = 0; c<ss_size+1;c++){
+                            memset(dV_ss + c * hidden_size, 0.f, hidden_size * sizeof(real));
+                        }
+
+                        //TODO: word_dv_ss
+                        for(int c = 0;c<vocab[inputs[i]].character_size;c++){
+                            for (int j = 0; j < hidden_size;j++){
+                                dV_ss[c*hidden_size+j] += exp_att[c]*cbowM[j];
+                            }
+                        }
+
+
+                        //dV_ss -> dInput_ss
+                        for(int i = 0; i< hidden_size; i++){
+                            for(int j = 0; j<hidden_size;j++){
+                                for(int s=0;s<ss_size+1;s++){
+                                    dInput_ss[s*hidden_size + j] = dV_ss[s*hidden_size + j]*V[j*hidden_size+i];
+                                }
+                            }
+                        }
+//                        real *dQ_V = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
+//                        for(int i = 0; i < (ss_size+1);i++){
+//                            memset(dQ_V,0.f,hidden_size*sizeof(real));
+//                        }
+//                        MatrixMulBW(dQ_V,ss_size+1,hidden_size,dV_ss,V,hidden_size);
+//                        real *dExp_att = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
+//                        memset(dExp_att,0.f,(ss_size+1) * sizeof(real));
+
+
+
+
+                        //dV_ss -> V
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
+                                    dV_ss,hidden_size,Input_ss,hidden_size,1.0f,V,hidden_size);
+//                        cblas_sgemm(CblasRowMajor,CblasTrans)
+
+
+                        //cbowM -> weight
+                        for(int i = 0; i < hidden_size; i++){
+                            for(int j=0; j < (ss_size+1); j++){
+                                dExp_att[j] += cbowM[i] * v_substrings[i + j*hidden_size];
+                            }
+                        }
+
+                        // softmax' -> weight
+                        real *dSoftmax = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
+                        memset(dSoftmax,0.f,(ss_size+1)*sizeof(real));
+                        SoftmaxBW(dSoftmax,dExp_att,hidden_size);
+
+                        // weight dot -> dQ
+                        // weight -> dK_substring
+                        real *dQ_word = (real *)_mm_malloc(hidden_size*sizeof(real),64); // 1*hidden_size
+                        real *dK_substring = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
+                        memset(dQ_word,0.f,hidden_size*sizeof(real));
+                        for(int i = 0;i<(ss_size+1);i++){
+                            memset(dK_substring+i*hidden_size,0.f,hidden_size*sizeof(real));
+                        }
+                        MatrixVectorDotBW(dQ_word,dSoftmax,K_substring,(ss_size+1),hidden_size,0.1);
+                        VectorMatrixDotBW(dK_substring,dSoftmax,Q_word,(ss_size+1),hidden_size,0.1);
+
+                        // dQ_word -> dInput_ss
+                        for(int i = 0; i < hidden_size; i++){
+                            for(int j=0; j < hidden_size;j++){
+                                dInput_ss[i] += dQ_word[j] * Q[j+i*hidden_size];
+                            }
+                        }
+
+                        // dK_substring -> dInput_ss
+                        for(int i = 0; i < hidden_size; i++){
+                            for(int j=0; j < hidden_size; j++){
+                                for(int s=0;s<ss_size+1;s++){
+                                    dInput_ss[j + s*hidden_size] += dK_substring[j + s*hidden_size]*K[j*hidden_size + i];
+                                }
+                            }
+                        }
+
+                        // dQ_word -> Q
+                        for(int i = 0; i < hidden_size; i++){
+                            for(int j = 0; j < hidden_size; j++){
+                                last_word = inputs[j];
+                                Q[j+i*hidden_size] += Wih[i+hidden_size * last_word] * dQ_word[i];
+                            }
+                        }
+
+                        // dK_substring -> K
+                        for(int i = 0; i < hidden_size; i++){
+                            for(int j = 0; j < hidden_size; j++){
+                                for(int s= 0; s< ss_size+1;s++){
+                                    K[j + i*hidden_size] += dK_substring[j+s*hidden_size] * Input_ss[j+s*hidden_size];
+                                }
+                            }
+                        }
+
+
+
+                        _mm_free(dV_ss)
                     }
                 }
 
@@ -2023,13 +2178,15 @@ void saveModel() {
                     }
                     tmp /= vocab[a].character_size;
                     fprintf(fo, "%f ", (Wih[a * hidden_size + b]+tmp)/2);
-                }else if(model_type==2){
+                }else if(model_type==2) {
                     real tmp = 0.f;
-                    for(int i = 0;i<vocab[a].character_size;i++){
-                        tmp += charv[vocab[a].character[i] * hidden_size+b];
+                    for (int i = 0; i < vocab[a].character_size; i++) {
+                        tmp += charv[vocab[a].character[i] * hidden_size + b];
                     }
                     tmp /= vocab[a].character_size;
-                    fprintf(fo, "%f ", (WeightH[a] * Wih[a * hidden_size + b])+(1-WeightH[a])*tmp);
+                    fprintf(fo, "%f ", (WeightH[a] * Wih[a * hidden_size + b]) + (1 - WeightH[a]) * tmp);
+                }else if(model_type==3){
+
                 }else{
                     fprintf(fo, "%f ", Wih[a * hidden_size + b]);
                 }
