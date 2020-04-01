@@ -507,6 +507,13 @@ void InitNet() {
         }
         printf("initNet()\n");
     }else if(model_type==3){
+        printf("char!\ncharactersize: %lld\n",character_size);
+        a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
+        if (charv == NULL) {printf("Memory allocation failed\n"); exit(1);}
+        for (a = 0; a < (long long)character_size * hidden_size; a++) {
+            next_random = next_random * (unsigned long long)25214903917 + 11;
+            charv[a] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / hidden_size;
+        }
         Q = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
         K = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
         V = (real *) _mm_malloc(hidden_size * hidden_size * sizeof(real), 64);
@@ -1325,15 +1332,26 @@ void Train_CBOWBasedNS() {
         real *V_substring;
         real *exp_att;
         real *Input_ss;
+        real *dSoftmax;
+        real *dV_ss;
+        real *dK_substring;
+        real *dQ_word;
+        real *dExp_att;
+        real *dInput_ss;
         if(model_type==3){
 
             Q_word = (real *) _mm_malloc(hidden_size*sizeof(real),64);
             K_substring = (real *) _mm_malloc( MAX_SUBSTRING * hidden_size* sizeof(real),64);
             V_substring = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
             Input_ss = (real *) _mm_malloc(MAX_SUBSTRING * hidden_size * sizeof(real),64);
-
+            dSoftmax = (real *)_mm_malloc(MAX_SUBSTRING*sizeof(real),64);
+            dK_substring = (real *)_mm_malloc((MAX_SUBSTRING+1)*hidden_size*sizeof(real),64);
+            dV_ss = (real *)_mm_malloc((MAX_SUBSTRING+1)*hidden_size*sizeof(real),64);
+            dQ_word = (real *)_mm_malloc(hidden_size*sizeof(real),64); // 1*hidden_size
             exp_att = (real *) _mm_malloc(MAX_SUBSTRING * sizeof(real),64);
-            if (!Q_word || !K_substring || !V_substring || !Input_ss || !exp_att) {
+            dExp_att = (real *)_mm_malloc(MAX_SUBSTRING*sizeof(real),64);
+            dInput_ss = (real *) _mm_malloc(MAX_SUBSTRING * hidden_size*sizeof(real),64);
+            if (!Q_word || !K_substring || !V_substring || !Input_ss || !exp_att) { //FIXME: add dV_ss etc.
                 printf("Memory allocation failed\n");
                 exit(1);
             }
@@ -1477,13 +1495,7 @@ void Train_CBOWBasedNS() {
                     }
                 }
                 if(model_type==3){
-                    memset(Q,0.f,hidden_size*sizeof(real));
-                    #pragma omp parallel for num_threads(num_threads) schedule(static, 1)
-                    for(int i = 0; i < MAX_SUBSTRING; i++) {
-                        memset(K_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
-                        memset(V_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
-                        memset(exp_att + i, 0.f, sizeof(real));
-                    }
+
 
                 }
 
@@ -1527,14 +1539,22 @@ void Train_CBOWBasedNS() {
 
                     // Attention forwad
                     if(model_type==3){
+                        //debug
+//                        printf("1\n");
                         last_word = inputs[j];
                         int ss_size = vocab[last_word].character_size;
                         //TODO: q_word
-
+                        memset(Q_word,0.f,hidden_size*sizeof(real));
+                        for(int i = 0; i < MAX_SUBSTRING; i++) {
+                            memset(K_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                            memset(V_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                            memset(exp_att + i, 0.f, sizeof(real));
+                        }
                         //inputs->q_word 1x 100
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,hidden_size,
                                 1.0f,Wih+hidden_size*last_word,hidden_size,Q,hidden_size,0.0f,Q_word,hidden_size);
-
+                        //debug
+//                        printf("2\n");
                         //inputs -> k_substring ss_size+1x100
                         //inputs -> v_substring ss_size+1x100
                         memcpy(Input_ss,Wih+hidden_size*last_word,hidden_size * sizeof(real));
@@ -1547,8 +1567,10 @@ void Train_CBOWBasedNS() {
                                 1.0f,Input_ss,hidden_size,K,hidden_size,0.0f,V_substring,hidden_size);
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,ss_size+1,hidden_size,hidden_size,
                                 1.0f,Input_ss,hidden_size,V,hidden_size,0.0f,V_substring,hidden_size);
-
-                        //q_word,k_substring -> weights 1* ss_size+1
+                        //debug
+//                        printf("3\n");
+                        //q_word,k_s
+                        // ubstring -> weights 1* ss_size+1
 
                         //TODO: unchecked
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
@@ -1564,25 +1586,30 @@ void Train_CBOWBasedNS() {
                         for( int i = 0; i < ss_size+1; i++){
                             exp_att[i] /= 10*su; // 10 is sqrt(hidden_size)
                         }
-//                        for( int i = 0; i < ss_size+1; i++){
-//                            cbowM[i] += exp_att[i] * v_substring[i];
-//                        }
+                        //debug
+//                        printf("4\n");
                         // weight * v_ss -> 1*100
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,ss_size+1,
                                 1.0f,exp_att,ss_size+1,V_substring,hidden_size,0.0f,cbowM,hidden_size);
+                        //debug
+//                        printf("4.5\n");
                     }
 
                 }
                 for (int k = 0; k < hidden_size; k++) cbowM[k] = cbowM[k] / input_size;
 
                 //output_size -> negative_size +1
-                //meta -> labelmodel_type
+                //meta -> label
                 // input_size -> N
                 // hidden_size -> D
                 // f -> inn
                 // g -> err*alpha
+                //debug
+//                printf("4.6\n");
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, 1, hidden_size, 1.0f, outputM,
                         hidden_size, cbowM, hidden_size, 0.0f, corrM, 1);
+                //debug
+//                printf("4.65\n");
                 for (int i = 0; i < output_size; i++) {
                     int c = outputs.meta[i];
                     real f = corrM[i];
@@ -1596,16 +1623,20 @@ void Train_CBOWBasedNS() {
                     corrM[i] = f * c;
 
                 }
-
+                //debug
+//                printf("4.7\n");
 
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, 1, 1.0f, corrM,
                         1, cbowM, hidden_size, 0.0f, outputMd, hidden_size);
 
-
+                //debug
+//                printf("4.8\n");
                 //inputM -> Min
                 cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, 1, hidden_size, output_size, 1.0f, corrM,
                         1, outputM, hidden_size, 0.0f, cbowM, hidden_size);
 
+                //debug
+//                printf("4.9\n");
                 // subnet update
                 for (int i = 0; i < input_size; i++) {
 //                    int src = i * hidden_size;
@@ -1642,32 +1673,40 @@ void Train_CBOWBasedNS() {
                     }
                     if(model_type == 3){
                         // Attention backward
-
+                        //debug
+//                        printf("5\n");
                         int ss_size = vocab[inputs[i]].character_size;
                         //initial
-                        real *dInput_ss = (real *) _mm_malloc((ss_size+1) * hidden_size*sizeof(real),64);
+//                        real *dInput_ss = (real *) _mm_malloc((ss_size+1) * hidden_size*sizeof(real),64);
                         for( int c = 0; c<ss_size+1;c++){
                             memset(dInput_ss + c * hidden_size, 0.f, hidden_size * sizeof(real));
                         }
 
-                        real *dSoftmax = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
+//                        real *dSoftmax = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
                         memset(dSoftmax,0.f,(ss_size+1)*sizeof(real));
-
-                        real *dV_ss = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
+                        //debug
+//                        printf("5.5\n");
+//                        dV_ss = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
                         for( int c = 0; c<ss_size+1;c++){
                             memset(dV_ss + c * hidden_size, 0.f, hidden_size * sizeof(real));
                         }
-
-                        real *dQ_word = (real *)_mm_malloc(hidden_size*sizeof(real),64); // 1*hidden_size
+                        //debug
+//                        printf("5.6\n");
+//                        real *dQ_word = (real *)_mm_malloc(hidden_size*sizeof(real),64); // 1*hidden_size
                         memset(dQ_word,0.f,hidden_size*sizeof(real));
-                        real *dK_substring = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
-                        for(int i = 0;i<(ss_size+1);i++){
-                            memset(dK_substring+i*hidden_size,0.f,hidden_size*sizeof(real));
+//                          real *dK_substring = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
+                        //debug
+//                        printf("5.67\n");
+                        for( int c = 0; c<ss_size+1;c++){
+                            memset(dK_substring + c * hidden_size, 0.f, hidden_size * sizeof(real));
                         }
-
-                        real *dExp_att = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
+                        //debug
+//                        printf("5.7\n");
+//                        real *dExp_att = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
                         memset(dExp_att,0.f,(ss_size+1)*sizeof(real));
 
+                        //debug
+//                        printf("6\n");
                         //TODO: dV_ss
                         for(int c = 0;c<ss_size+1;c++){
                             for (int j = 0; j < hidden_size;j++){
@@ -1675,7 +1714,8 @@ void Train_CBOWBasedNS() {
                             }
                         }
 
-
+                        //debug
+//                        printf("7\n");
                         //dV_ss -> dInput_ss
                         for(int col_ = 0; col_< hidden_size; col_++){
                             for(int j = 0; j<hidden_size;j++){
@@ -1698,25 +1738,29 @@ void Train_CBOWBasedNS() {
                         //dV_ss -> V
 //                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
 //                                    dV_ss,hidden_size,Input_ss,hidden_size,1.0f,V,hidden_size);
-                        for(int row_ = 0; row_ < hidden_size; i++){
+                        //debug
+//                        printf("8\n");
+                        for(int row_ = 0; row_ < hidden_size; row_++){
                             for(int j = 0; j < hidden_size; j++){
-                                for(int s= 0; s< ss_size+1;s++){
+                                for(int s= 0; s< ss_size+1; s++){
                                     V[j + row_*hidden_size] += dV_ss[j+s*hidden_size] * Input_ss[row_+s*hidden_size];
                                 }
                             }
                         }
 
                         //cbowM -> weight
-                        for(int i = 0; i < hidden_size; i++){
+                        for(int row_ = 0; row_ < hidden_size; row_++){
                             for(int j=0; j < (ss_size+1); j++){
-                                dExp_att[j] += cbowM[i] * V_substring[i + j*hidden_size];
+                                dExp_att[j] += cbowM[row_] * V_substring[row_ + j*hidden_size];
                             }
                         }
 
                         // softmax' -> weight
-
+                        //debug
+//                        printf("8.5\n");
                         SoftmaxBW(dSoftmax,dExp_att,hidden_size);
-
+                        //debug
+//                        printf("9\n");
                         // weight dot -> dQ
                         // weight -> dK_substring
 
@@ -1729,7 +1773,6 @@ void Train_CBOWBasedNS() {
                                 dInput_ss[i] += dQ_word[j] * Q[j+i*hidden_size];
                             }
                         }
-
                         // dK_substring -> dInput_ss
                         for(int col_ = 0; col_< hidden_size; col_++){
                             for(int j = 0; j<hidden_size;j++){
@@ -1748,7 +1791,7 @@ void Train_CBOWBasedNS() {
                         }
 
                         // dK_substring -> K
-                        for(int row_ = 0; row_ < hidden_size; i++){
+                        for(int row_ = 0; row_ < hidden_size; row_++){
                             for(int j = 0; j < hidden_size; j++){
                                 for(int s= 0; s< ss_size+1;s++){
                                     K[j + row_*hidden_size] += dK_substring[j+s*hidden_size] * Input_ss[row_+s*hidden_size];
@@ -1763,16 +1806,17 @@ void Train_CBOWBasedNS() {
                         }
                         for(int row_=1; row_ < ss_size+1;row_++){
                             for(int j = 0; j < hidden_size;j++){
-                                charv_id = vocab[last_word].character[i-1];
+                                charv_id = vocab[last_word].character[row_-1];
                                 charv[j+charv_id * hidden_size] += dInput_ss[j + row_ * hidden_size];
                             }
                         }
-
+                        //debug
+//                        printf("10\n");
                         //free memory
-                        _mm_free(dV_ss);
-                        _mm_free(dK_substring);
-                        _mm_free(dQ_word);
-                        _mm_free(dInput_ss);
+//                        _mm_free(dV_ss);
+//                        _mm_free(dK_substring);
+//                        _mm_free(dQ_word);
+//                        _mm_free(dInput_ss);
                     }
                 }
 
@@ -1794,6 +1838,14 @@ void Train_CBOWBasedNS() {
         _mm_free(outputM);
         _mm_free(outputMd);
         _mm_free(corrM);
+        if(model_type==3){
+            _mm_free(dV_ss);
+            _mm_free(dK_substring);
+            _mm_free(dQ_word);
+            _mm_free(dInput_ss);
+            _mm_free(dSoftmax);
+            _mm_free(dExp_att);
+        }
         if (disk) {
             fclose(fin);
         } else {
@@ -2192,6 +2244,19 @@ int ArgPos(char *str, int argc, char **argv) {
 }
 
 void saveModel() {
+    real *Q_word;
+    real *K_substring;
+    real *V_substring;
+    real *exp_att;
+    real *Input_ss;
+    Q_word = (real *) _mm_malloc(hidden_size*sizeof(real),64);
+    K_substring = (real *) _mm_malloc( MAX_SUBSTRING * hidden_size* sizeof(real),64);
+    V_substring = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
+    Input_ss = (real *) _mm_malloc(MAX_SUBSTRING * hidden_size * sizeof(real),64);
+    exp_att = (real *) _mm_malloc(MAX_SUBSTRING * sizeof(real),64);
+    real *cbowM = (real *)_mm_malloc(hidden_size*sizeof(real),64);
+
+
     // save the model
     FILE *fo = fopen(output_file, "wb");
     // Save the word vectors
@@ -2217,12 +2282,50 @@ void saveModel() {
                     }
                     tmp /= vocab[a].character_size;
                     fprintf(fo, "%f ", (WeightH[a] * Wih[a * hidden_size + b]) + (1 - WeightH[a]) * tmp);
-                }else if(model_type==3){
-
-                }else{
+                }else if(model_type==0){
                     fprintf(fo, "%f ", Wih[a * hidden_size + b]);
                 }
+            }
+            if(model_type==3){
 
+
+                memset(cbowM,0.f,hidden_size*sizeof(real));
+//                int last_word = inputs[j];
+                int ss_size = vocab[a].character_size;
+                memset(Q_word,0.f,hidden_size*sizeof(real));
+                for(int i = 0; i < MAX_SUBSTRING; i++) {
+                    memset(K_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                    memset(V_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
+                    memset(exp_att + i, 0.f, sizeof(real));
+                }
+                cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,hidden_size,
+                            1.0f,Wih+hidden_size*a,hidden_size,Q,hidden_size,0.0f,Q_word,hidden_size);
+                memcpy(Input_ss,Wih+hidden_size*a,hidden_size * sizeof(real));
+                for( int i = 1; i < ss_size+1;i++){
+                    int charv_id = vocab[a].character[i-1];
+                    memcpy(Input_ss + i*hidden_size, charv + charv_id * hidden_size,
+                           hidden_size * sizeof(real));
+                }
+                cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,ss_size+1,hidden_size,hidden_size,
+                            1.0f,Input_ss,hidden_size,K,hidden_size,0.0f,V_substring,hidden_size);
+                cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,ss_size+1,hidden_size,hidden_size,
+                            1.0f,Input_ss,hidden_size,V,hidden_size,0.0f,V_substring,hidden_size);
+
+                cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
+                            1.0f, Q_word,hidden_size,V_substring,hidden_size,0.0f,exp_att,hidden_size);
+                real su = 0.f;
+                for( int i = 0; i < ss_size+1; i++){
+                    exp_att[i] = exp(exp_att[i]);
+                    su += exp_att[i];
+                }
+                for( int i = 0; i < ss_size+1; i++){
+                    exp_att[i] /= 10*su; // 10 is sqrt(hidden_size)
+                }
+                cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,ss_size+1,
+                            1.0f,exp_att,ss_size+1,V_substring,hidden_size,0.0f,cbowM,hidden_size);
+                for (int b = 0; b < hidden_size; b++) {
+                    fprintf(fo, "%f ", cbowM[b]);
+                }
             }
         }
         fprintf(fo, "\n");
