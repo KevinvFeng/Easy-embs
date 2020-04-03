@@ -1754,7 +1754,7 @@ void Train_CBOWBasedNS() {
                                 dExp_att[j] += cbowM[row_] * V_substring[row_ + j*hidden_size];
                             }
                         }
-
+//                        printf("1\n");
                         // softmax' -> weight
                         //debug
 //                        printf("8.5\n");
@@ -1810,8 +1810,8 @@ void Train_CBOWBasedNS() {
                                 charv[j+charv_id * hidden_size] += dInput_ss[j + row_ * hidden_size];
                             }
                         }
-                        //debug
-//                        printf("10\n");
+//                        debug
+//                        printf("2\n");
                         //free memory
 //                        _mm_free(dV_ss);
 //                        _mm_free(dK_substring);
@@ -1838,14 +1838,24 @@ void Train_CBOWBasedNS() {
         _mm_free(outputM);
         _mm_free(outputMd);
         _mm_free(corrM);
-        if(model_type==3){
-            _mm_free(dV_ss);
-            _mm_free(dK_substring);
-            _mm_free(dQ_word);
-            _mm_free(dInput_ss);
-            _mm_free(dSoftmax);
-            _mm_free(dExp_att);
-        }
+//        if(model_type==3){
+//            printf("mm_free3\n");
+//            _mm_free(Q_word);
+//            printf("mm_free3.1\n");
+//            _mm_free(K_substring);
+//            printf("mm_free3.2\n");
+//            _mm_free(V_substring);
+//            _mm_free(exp_att);
+//            _mm_free(Input_ss);
+//            _mm_free(dSoftmax);
+//            _mm_free(dV_ss);
+//            _mm_free(dK_substring);
+//            _mm_free(dQ_word);
+//            _mm_free(dExp_att);
+//            _mm_free(dInput_ss);
+////            _mm_free()
+//            printf("mm_free4\n");
+//        }
         if (disk) {
             fclose(fin);
         } else {
