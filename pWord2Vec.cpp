@@ -483,6 +483,12 @@ void InitNet() {
         Wih[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
     }
 
+    next_random = 2;
+    for (int i = 0; i < vocab_size * hidden_size; i++) {
+        next_random = next_random * (ulonglong) 25214903917 + 11;
+        Woh[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+    }
+
     if (model_type==1) {
         printf("char!\ncharactersize: %lld\n",character_size);
         a = posix_memalign((void **)&charv, 128, (long long)character_size * hidden_size * sizeof(real));
@@ -536,17 +542,24 @@ void InitNet() {
         ulonglong next_random = 1;
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
-            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+//            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
+//            printf("%f\t", Q[i]);
+//            if((i+1)%hidden_size==0){
+//                printf("\n");
+//            }
         }
         next_random = 2;
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
-            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+//            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
         }
         next_random = 3;
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
-            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+//            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
         }
     }
 
@@ -1232,20 +1245,61 @@ void MatrixMulBW(real X[],int X_row,int X_col,real gradient[],real W[],int W_col
         }
     }
 }
-void SoftmaxBW(real dVec[], real Vec[],int size){
-    double e_sum = 0.0;
-    for(int i = 0; i < size;i++){
-        e_sum += exp(Vec[i]);
+//FIXME: Check it
+//void SoftmaxBW(real dVec[], real Vec[],int size){
+//    float e_sum = 0.0;
+//    for(int i = 0; i < size;i++){
+//        e_sum += exp(Vec[i]);
+//    }
+//    for(int i = 0; i<size;i++){
+//        for(int j = 0;j<size;j++){
+//            if(i==j){
+//                dVec[i]+=exp(Vec[i])*(e_sum-exp(Vec[i])) / (e_sum*e_sum);
+//            }else{
+//                dVec[i]-= exp(Vec[i])*exp(Vec[j])/ (e_sum * e_sum);
+//            }
+//        }
+//    }
+//}
+void SoftmaxBW(real dVec[], real Vec[], real dL[], int size){
+//    real su = 0.f;
+//    for( int i = 0; i < size; i++){
+//        exp_att[i] = exp(exp_att[i]/10); // 10 is sqrt(hidden_size)
+//        su += exp_att[i];
+//    }
+//    for( int i = 0; i < size; i++){
+//        exp_att[i] /= su;
+//    }
+    real *mat1 = (real *)_mm_malloc(size*size * sizeof(real), 64);
+    real *vec1 = (real *)_mm_malloc(size * sizeof(real), 64);
+    real *mat2 = (real *)_mm_malloc(size*size * sizeof(real), 64);
+    real *vec2 = (real *)_mm_malloc(size * sizeof(real), 64);
+    memset(mat1,0.0f,size*size*sizeof(real));
+    memset(vec1,0.0f,size*sizeof(real));
+    for(int index = 0; index<size;index++){
+        vec1[index] = 1.0f;
     }
-    for(int i = 0; i<size;i++){
-        for(int j = 0;j<size;j++){
-            if(i==j){
-                dVec[i]+=exp(Vec[i])*(e_sum-exp(Vec[i])) / (e_sum*e_sum);
-            }else{
-                dVec[i]-= exp(Vec[i])*exp(Vec[j])/ (e_sum * e_sum);
-            }
+
+    memset(mat2,0.0f,size*size*sizeof(real));
+    memset(vec2,0.0f,size*sizeof(real));
+    for(int index = 0; index<size;index++){
+        vec2[index] = -1.0f;
+    }
+    cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,size,size,1,
+                1.0f,Vec,1,vec1,size,0.0f,mat1,size);
+    cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,size,size,1,
+               1.0f,vec2,1,Vec,size,0.0f,mat2,size);
+    for(int i = 0; i < size; i++){
+        mat2[i*size+i] += 1.0f;
+    }
+    for(int row = 0;row<size;row++){
+        for(int col =0;col<size;col++){
+            mat1[row*size+col] *= mat2[row*size+col];
         }
     }
+    _mm_free(mat2);
+    cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,size,1,size,
+                1.0f,mat1,size,dL,1,0.0f,dVec,1);
 }
 void VectorMatrixDotBW(real dA[],real gradient[], real B[],int row,int col,float alpha){
     for(int i=0;i<row;i++){
@@ -1488,6 +1542,7 @@ void Train_CBOWBasedNS() {
                     memcpy(outputM + i * hidden_size, Woh + outputs.indices[i] * hidden_size,
                            hidden_size * sizeof(real));
                 }
+
                 if(model_type==2){
                     for (int i = 0; i < input_size; i++) {
                         memcpy(weightM + i , WeightH + inputs[input_start + i] ,
@@ -1539,8 +1594,6 @@ void Train_CBOWBasedNS() {
 
                     // Attention forwad
                     if(model_type==3){
-                        //debug
-//                        printf("1\n");
                         last_word = inputs[j];
                         int ss_size = vocab[last_word].character_size;
                         //TODO: q_word
@@ -1553,46 +1606,65 @@ void Train_CBOWBasedNS() {
                         //inputs->q_word 1x 100
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,hidden_size,
                                 1.0f,Wih+hidden_size*last_word,hidden_size,Q,hidden_size,0.0f,Q_word,hidden_size);
-                        //debug
-//                        printf("2\n");
+//                        for(int k = 0; k < hidden_size;k++){
+//                            printf("%f\t", Wih[k+hidden_size*last_word]);
+//                        }
+//                        printf("\n");
                         //inputs -> k_substring ss_size+1x100
                         //inputs -> v_substring ss_size+1x100
                         memcpy(Input_ss,Wih+hidden_size*last_word,hidden_size * sizeof(real));
-                        for( int i = 1; i < ss_size+1;i++){
-                            charv_id = vocab[last_word].character[i-1];
-                            memcpy(Input_ss + i*hidden_size, charv + charv_id * hidden_size,
+                        for( int row_ = 1; row_ < ss_size+1;row_++){
+                            charv_id = vocab[last_word].character[row_-1];
+                            memcpy(Input_ss + row_*hidden_size, charv + charv_id * hidden_size,
                                    hidden_size * sizeof(real));
                         }
+//                        for(int c = 0; c<hidden_size;c++){
+//                            for(int k = 0; k < hidden_size;k++){
+//                                printf("%f\t", Q[c+k*hidden_size]);
+//                            }
+//                            printf("\n");
+//                        }
+//                        printf("\n");
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,ss_size+1,hidden_size,hidden_size,
-                                1.0f,Input_ss,hidden_size,K,hidden_size,0.0f,V_substring,hidden_size);
+                                1.0f,Input_ss,hidden_size,K,hidden_size,0.0f,K_substring,hidden_size);
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,ss_size+1,hidden_size,hidden_size,
                                 1.0f,Input_ss,hidden_size,V,hidden_size,0.0f,V_substring,hidden_size);
-                        //debug
-//                        printf("3\n");
+//                        for(int c = 0
                         //q_word,k_s
                         // ubstring -> weights 1* ss_size+1
 
                         //TODO: unchecked
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
-                                1.0f, Q_word,hidden_size,V_substring,hidden_size,0.0f,exp_att,hidden_size);
+                                1.0f, Q_word,hidden_size,K_substring,hidden_size,0.0f,exp_att,ss_size+1);
+
+                        for(int k = 0; k < ss_size+1;k++){
+                            printf("%f\t", exp_att[k]);
+                        }
+                        printf("\n");
+
 
                         //softmax(weights)
                         //softmax[i]= exp(value[i])/sum(exp(value))
                         real su = 0.f;
                         for( int i = 0; i < ss_size+1; i++){
-                            exp_att[i] = exp(exp_att[i]);
+                            exp_att[i] = exp(exp_att[i]/10); // 10 is sqrt(hidden_size)
                             su += exp_att[i];
                         }
                         for( int i = 0; i < ss_size+1; i++){
-                            exp_att[i] /= 10*su; // 10 is sqrt(hidden_size)
+                            exp_att[i] /= su;
                         }
-                        //debug
-//                        printf("4\n");
+//                        for(int k = 0; k < ss_size+1;k++){
+//                            printf("%f\t", exp_att[k]);
+//                        }
+//                        printf("\n");
                         // weight * v_ss -> 1*100
-                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,ss_size+1,
-                                1.0f,exp_att,ss_size+1,V_substring,hidden_size,0.0f,cbowM,hidden_size);
-                        //debug
-//                        printf("4.5\n");
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,ss_size+1,
+                                1.0f,exp_att,ss_size+1,V_substring,hidden_size,1.0f,cbowM,hidden_size);
+//                        for(int k = 0; k < hidden_size;k++){
+//                            printf("%f\t", cbowM[k]);
+//                        }
+//                        printf("\n");
+
                     }
 
                 }
@@ -1604,12 +1676,8 @@ void Train_CBOWBasedNS() {
                 // hidden_size -> D
                 // f -> inn
                 // g -> err*alpha
-                //debug
-//                printf("4.6\n");
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, output_size, 1, hidden_size, 1.0f, outputM,
                         hidden_size, cbowM, hidden_size, 0.0f, corrM, 1);
-                //debug
-//                printf("4.65\n");
                 for (int i = 0; i < output_size; i++) {
                     int c = outputs.meta[i];
                     real f = corrM[i];
@@ -1623,24 +1691,19 @@ void Train_CBOWBasedNS() {
                     corrM[i] = f * c;
 
                 }
-                //debug
-//                printf("4.7\n");
 
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, output_size, hidden_size, 1, 1.0f, corrM,
                         1, cbowM, hidden_size, 0.0f, outputMd, hidden_size);
 
-                //debug
-//                printf("4.8\n");
                 //inputM -> Min
                 cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, 1, hidden_size, output_size, 1.0f, corrM,
                         1, outputM, hidden_size, 0.0f, cbowM, hidden_size);
 
-                //debug
-//                printf("4.9\n");
                 // subnet update
                 for (int i = 0; i < input_size; i++) {
 //                    int src = i * hidden_size;
 //                    int des = inputs[input_start + i] * hidden_size;
+
 
                     if(model_type==0)
                         VectorAddBW(cbowM,hidden_size,Wih,inputs[input_start + i], 1.0f);
@@ -1673,8 +1736,6 @@ void Train_CBOWBasedNS() {
                     }
                     if(model_type == 3){
                         // Attention backward
-                        //debug
-//                        printf("5\n");
                         int ss_size = vocab[inputs[i]].character_size;
                         //initial
 //                        real *dInput_ss = (real *) _mm_malloc((ss_size+1) * hidden_size*sizeof(real),64);
@@ -1684,46 +1745,27 @@ void Train_CBOWBasedNS() {
 
 //                        real *dSoftmax = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
                         memset(dSoftmax,0.f,(ss_size+1)*sizeof(real));
-                        //debug
-//                        printf("5.5\n");
 //                        dV_ss = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
                         for( int c = 0; c<ss_size+1;c++){
                             memset(dV_ss + c * hidden_size, 0.f, hidden_size * sizeof(real));
                         }
-                        //debug
-//                        printf("5.6\n");
 //                        real *dQ_word = (real *)_mm_malloc(hidden_size*sizeof(real),64); // 1*hidden_size
                         memset(dQ_word,0.f,hidden_size*sizeof(real));
 //                          real *dK_substring = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
-                        //debug
-//                        printf("5.67\n");
                         for( int c = 0; c<ss_size+1;c++){
                             memset(dK_substring + c * hidden_size, 0.f, hidden_size * sizeof(real));
                         }
-                        //debug
-//                        printf("5.7\n");
 //                        real *dExp_att = (real *)_mm_malloc((ss_size+1)*sizeof(real),64);
                         memset(dExp_att,0.f,(ss_size+1)*sizeof(real));
 
-                        //debug
-//                        printf("6\n");
-                        //TODO: dV_ss
-                        for(int c = 0;c<ss_size+1;c++){
-                            for (int j = 0; j < hidden_size;j++){
-                                dV_ss[c*hidden_size+j] += exp_att[c]*cbowM[j];
-                            }
-                        }
 
-                        //debug
-//                        printf("7\n");
+                        //TODO: dV_ss
+                        cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,ss_size+1,hidden_size,1,1.0f,
+                                exp_att,ss_size+1,cbowM,hidden_size,0.0f,dV_ss,hidden_size);
+
                         //dV_ss -> dInput_ss
-                        for(int col_ = 0; col_< hidden_size; col_++){
-                            for(int j = 0; j<hidden_size;j++){
-                                for(int s=0;s<ss_size+1;s++){
-                                    dInput_ss[s*hidden_size + j] = dV_ss[s*hidden_size + col_]*V[j*hidden_size+col_];
-                                }
-                            }
-                        }
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
+                                dV_ss,hidden_size,V,hidden_size,1.0f, dInput_ss,hidden_size);
 //                        real *dQ_V = (real *)_mm_malloc((ss_size+1)*hidden_size*sizeof(real),64);
 //                        for(int i = 0; i < (ss_size+1);i++){
 //                            memset(dQ_V,0.f,hidden_size*sizeof(real));
@@ -1738,66 +1780,72 @@ void Train_CBOWBasedNS() {
                         //dV_ss -> V
 //                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
 //                                    dV_ss,hidden_size,Input_ss,hidden_size,1.0f,V,hidden_size);
-                        //debug
-//                        printf("8\n");
-                        for(int row_ = 0; row_ < hidden_size; row_++){
-                            for(int j = 0; j < hidden_size; j++){
-                                for(int s= 0; s< ss_size+1; s++){
-                                    V[j + row_*hidden_size] += dV_ss[j+s*hidden_size] * Input_ss[row_+s*hidden_size];
-                                }
-                            }
-                        }
+
+                        cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,hidden_size,hidden_size,ss_size+1,1.0f,
+                                    Input_ss,hidden_size,dV_ss,hidden_size,1.0f,V,hidden_size);
+
 
                         //cbowM -> weight
-                        for(int row_ = 0; row_ < hidden_size; row_++){
-                            for(int j=0; j < (ss_size+1); j++){
-                                dExp_att[j] += cbowM[row_] * V_substring[row_ + j*hidden_size];
-                            }
-                        }
-//                        printf("1\n");
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,1.0f,
+                                    cbowM,hidden_size,V_substring,hidden_size,1.0f, dExp_att,ss_size+1);
+
                         // softmax' -> weight
-                        //debug
-//                        printf("8.5\n");
-                        SoftmaxBW(dSoftmax,dExp_att,hidden_size);
-                        //debug
-//                        printf("9\n");
+                        SoftmaxBW(dSoftmax,exp_att,dExp_att,ss_size+1);
+//                        for(int k = 0; k < ss_size+1;k++){
+//                            printf("%f\t", dExp_att[k]);
+//                        }
+//                        printf("\n");
+//                        for(int c = 0; c<ss_size+1;c++){
+//                            for(int k = 0; k < 1;k++){
+//                                printf("%f\t", dSoftmax[c+k*hidden_size]);
+//                            }
+//                            printf("\n");
+//                        }
+//                        printf("\n");
                         // weight dot -> dQ
                         // weight -> dK_substring
-
-                        MatrixVectorDotBW(dQ_word,dSoftmax,K_substring,(ss_size+1),hidden_size,0.1);
-                        VectorMatrixDotBW(dK_substring,dSoftmax,Q_word,(ss_size+1),hidden_size,0.1);
+                        //TODO: Check this
+//                        MatrixVectorDotBW(dQ_word,dSoftmax,K_substring,(ss_size+1),hidden_size,0.1);
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,ss_size+1,1.0f,
+                                    dSoftmax,ss_size+1,K_substring,hidden_size,1.0f, dQ_word,hidden_size);
+//                        for(int k = 0; k < hidden_size;k++){
+//                            printf("%f\t", dQ_word[k]);
+//                        }
+//                        printf("\n");
+//                        VectorMatrixDotBW(dK_substring,dSoftmax,Q_word,(ss_size+1),hidden_size,0.1);
+                        //FIXME: check it
+                        cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,ss_size+1,hidden_size,1,1.0f,
+                                    dSoftmax,ss_size+1,Q_word,hidden_size,1.0f,dK_substring,hidden_size);
 
                         // dQ_word -> dInput_ss
-                        for(int i = 0; i < hidden_size; i++){
-                            for(int j=0; j < hidden_size;j++){
-                                dInput_ss[i] += dQ_word[j] * Q[j+i*hidden_size];
-                            }
-                        }
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,hidden_size,hidden_size,1.0f,
+                                    dQ_word,hidden_size,Q,hidden_size,1.0f, dInput_ss,hidden_size);
+
+
+
+
                         // dK_substring -> dInput_ss
-                        for(int col_ = 0; col_< hidden_size; col_++){
-                            for(int j = 0; j<hidden_size;j++){
-                                for(int s=0;s<ss_size+1;s++){
-                                    dInput_ss[s*hidden_size + j] = dK_substring[s*hidden_size + col_]*K[j*hidden_size+col_];
-                                }
-                            }
-                        }
+                        cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
+                                    dK_substring,hidden_size,K,hidden_size,1.0f, dInput_ss,hidden_size);
+//                        for(int c = 0; c<hidden_size;c++){
+//                            for(int k = 0; k < ss_size+1;k++){
+//                                printf("%f\t", dInput_ss[c+k*hidden_size]);
+//                            }
+//                            printf("\n");
+//                        }
+//                        printf("\n");
+
 
                         // dQ_word -> Q
-                        last_word = inputs[i];
-                        for(int k = 0; k < hidden_size; k++){
-                            for(int j = 0; j < hidden_size; j++){
-                                Q[j+k*hidden_size] += Wih[k+hidden_size * last_word] * dQ_word[j];
-                            }
-                        }
+                        cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,hidden_size,hidden_size,1,1.0f,
+                                    Input_ss,hidden_size,dQ_word,hidden_size,1.0f,Q,hidden_size);
+
+
 
                         // dK_substring -> K
-                        for(int row_ = 0; row_ < hidden_size; row_++){
-                            for(int j = 0; j < hidden_size; j++){
-                                for(int s= 0; s< ss_size+1;s++){
-                                    K[j + row_*hidden_size] += dK_substring[j+s*hidden_size] * Input_ss[row_+s*hidden_size];
-                                }
-                            }
-                        }
+                        cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,hidden_size,hidden_size,ss_size+1,1.0f,
+                                    Input_ss,hidden_size,dK_substring,hidden_size,1.0f,K,hidden_size);
+
 
                         // dInput_ss -> Wih
                         memcpy(Input_ss,Wih+hidden_size*last_word,hidden_size * sizeof(real));
@@ -2088,6 +2136,7 @@ int main(int argc, char **argv) {
 
     if((model_type==0||model_type==1||model_type==2||model_type==3) && cbow_type == 1) {
         printf("model: CBOWNS\n");
+        printf("model_type: %d\n",model_type);
         character_size = (MAX_CHINESE - MIN_CHINESE + 1);
         Train_CBOWBasedNS();
     }else if(model_type==0 && cbow_type == 0){
