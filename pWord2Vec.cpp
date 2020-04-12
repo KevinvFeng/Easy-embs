@@ -112,6 +112,8 @@ real *charv;
 real *Q;
 real *K;
 real *V;
+//Softmax
+real *ETable = NULL;
 
 long long character_size = 0;
 int lang = 0;
@@ -483,11 +485,11 @@ void InitNet() {
         Wih[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
     }
 
-    next_random = 2;
-    for (int i = 0; i < vocab_size * hidden_size; i++) {
-        next_random = next_random * (ulonglong) 25214903917 + 11;
-        Woh[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
-    }
+//    next_random = 2;
+//    for (int i = 0; i < vocab_size * hidden_size; i++) {
+//        next_random = next_random * (ulonglong) 25214903917 + 11;
+//        Woh[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
+//    }
 
     if (model_type==1) {
         printf("char!\ncharactersize: %lld\n",character_size);
@@ -543,7 +545,7 @@ void InitNet() {
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
 //            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
-            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
+            Q[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f);
 //            printf("%f\t", Q[i]);
 //            if((i+1)%hidden_size==0){
 //                printf("\n");
@@ -553,13 +555,13 @@ void InitNet() {
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
 //            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
-            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
+            K[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f);
         }
         next_random = 3;
         for (int i = 0; i < hidden_size * hidden_size; i++) {
             next_random = next_random * (ulonglong) 25214903917 + 11;
 //            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) / hidden_size;
-            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f) * 10;
+            V[i] = (((next_random & 0xFFFF) / 65536.f) - 0.5f);
         }
     }
 
@@ -1596,7 +1598,6 @@ void Train_CBOWBasedNS() {
                     if(model_type==3){
                         last_word = inputs[j];
                         int ss_size = vocab[last_word].character_size;
-                        //TODO: q_word
                         memset(Q_word,0.f,hidden_size*sizeof(real));
                         for(int i = 0; i < MAX_SUBSTRING; i++) {
                             memset(K_substring + i * hidden_size, 0.f, hidden_size * sizeof(real));
@@ -1633,19 +1634,30 @@ void Train_CBOWBasedNS() {
                         //q_word,k_s
                         // ubstring -> weights 1* ss_size+1
 
-                        //TODO: unchecked
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
                                 1.0f, Q_word,hidden_size,K_substring,hidden_size,0.0f,exp_att,ss_size+1);
 
-                        for(int k = 0; k < ss_size+1;k++){
-                            printf("%f\t", exp_att[k]);
-                        }
-                        printf("\n");
+//                        for(int k = 0; k < ss_size;k++){
+//                            printf("%f\t", exp_att[k]);
+//                        }
+//                        printf("\n");
 
 
                         //softmax(weights)
                         //softmax[i]= exp(value[i])/sum(exp(value))
                         real su = 0.f;
+                        for(int i = 0; i < ss_size+1; i++){
+                            if (exp_att[i] > MAX_EXP){
+                                exp_att[i] = MAX_EXP;
+                            }
+                            else if (exp_att[i] < -MAX_EXP){
+                                exp_att[i] = -MAX_EXP;
+                            }
+                        }
+//                        for(int k = 0; k < ss_size;k++){
+//                            printf("%f\t", exp_att[k]);
+//                        }
+//                        printf("\n");
                         for( int i = 0; i < ss_size+1; i++){
                             exp_att[i] = exp(exp_att[i]/10); // 10 is sqrt(hidden_size)
                             su += exp_att[i];
@@ -1664,7 +1676,13 @@ void Train_CBOWBasedNS() {
 //                            printf("%f\t", cbowM[k]);
 //                        }
 //                        printf("\n");
-
+//                        for(int c = 0; c<hidden_size;c++){
+//                            for(int k = 0; k < ss_size+1;k++){
+//                                printf("%f\t", V_substring[c+k*hidden_size]);
+//                            }
+//                            printf("\n");
+//                        }
+//                        printf("\n");
                     }
 
                 }
@@ -1735,6 +1753,8 @@ void Train_CBOWBasedNS() {
                         }
                     }
                     if(model_type == 3){
+                        //FIXME: fix all variable like Input_ss because of for loop
+
                         // Attention backward
                         int ss_size = vocab[inputs[i]].character_size;
                         //initial
@@ -1759,9 +1779,8 @@ void Train_CBOWBasedNS() {
                         memset(dExp_att,0.f,(ss_size+1)*sizeof(real));
 
 
-                        //TODO: dV_ss
                         cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,ss_size+1,hidden_size,1,1.0f,
-                                exp_att,ss_size+1,cbowM,hidden_size,0.0f,dV_ss,hidden_size);
+                                exp_att,ss_size+1,cbowM,hidden_size,1.0f,dV_ss,hidden_size);
 
                         //dV_ss -> dInput_ss
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
@@ -1791,20 +1810,17 @@ void Train_CBOWBasedNS() {
 
                         // softmax' -> weight
                         SoftmaxBW(dSoftmax,exp_att,dExp_att,ss_size+1);
-//                        for(int k = 0; k < ss_size+1;k++){
-//                            printf("%f\t", dExp_att[k]);
-//                        }
-//                        printf("\n");
-//                        for(int c = 0; c<ss_size+1;c++){
-//                            for(int k = 0; k < 1;k++){
-//                                printf("%f\t", dSoftmax[c+k*hidden_size]);
+//                        for(int col = 0; col < hidden_size;col++){
+//
+//                            for(int k = 0; k < ss_size+1;k++){
+//                                printf("%f\t", V_substring[k*hidden_size+col]);
 //                            }
 //                            printf("\n");
 //                        }
 //                        printf("\n");
+
                         // weight dot -> dQ
                         // weight -> dK_substring
-                        //TODO: Check this
 //                        MatrixVectorDotBW(dQ_word,dSoftmax,K_substring,(ss_size+1),hidden_size,0.1);
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,ss_size+1,1.0f,
                                     dSoftmax,ss_size+1,K_substring,hidden_size,1.0f, dQ_word,hidden_size);
@@ -1813,7 +1829,6 @@ void Train_CBOWBasedNS() {
 //                        }
 //                        printf("\n");
 //                        VectorMatrixDotBW(dK_substring,dSoftmax,Q_word,(ss_size+1),hidden_size,0.1);
-                        //FIXME: check it
                         cblas_sgemm(CblasRowMajor,CblasTrans,CblasNoTrans,ss_size+1,hidden_size,1,1.0f,
                                     dSoftmax,ss_size+1,Q_word,hidden_size,1.0f,dK_substring,hidden_size);
 
@@ -1827,13 +1842,13 @@ void Train_CBOWBasedNS() {
                         // dK_substring -> dInput_ss
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,ss_size+1,hidden_size,hidden_size,1.0f,
                                     dK_substring,hidden_size,K,hidden_size,1.0f, dInput_ss,hidden_size);
-//                        for(int c = 0; c<hidden_size;c++){
-//                            for(int k = 0; k < ss_size+1;k++){
-//                                printf("%f\t", dInput_ss[c+k*hidden_size]);
-//                            }
-//                            printf("\n");
-//                        }
-//                        printf("\n");
+                        for(int c = 0; c<hidden_size;c++){
+                            for(int k = 0; k < ss_size+1;k++){
+                                printf("%f\t", dInput_ss[c+k*hidden_size]);
+                            }
+                            printf("\n");
+                        }
+                        printf("\n");
 
 
                         // dQ_word -> Q
@@ -2119,8 +2134,10 @@ int main(int argc, char **argv) {
     vocab_hash = (int *) _mm_malloc(vocab_hash_size * sizeof(int), 64);
     substring_hash = (int *) _mm_malloc(vocab_hash_size * sizeof(int), 64);
     expTable = (real *) _mm_malloc((EXP_TABLE_SIZE + 1) * sizeof(real), 64);
+    ETable = (real *) _mm_malloc((EXP_TABLE_SIZE + 1) * sizeof(real), 64);
     for (i = 0; i < EXP_TABLE_SIZE + 1; i++) {
         expTable[i] = exp((i / (real) EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
+        ETable[i] = exp((i / (real) EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
         expTable[i] = expTable[i] / (expTable[i] + 1);                    // Precompute f(x) = x / (x + 1)
     }
 
