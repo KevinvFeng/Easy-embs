@@ -1299,9 +1299,12 @@ void SoftmaxBW(real dVec[], real Vec[], real dL[], int size){
             mat1[row*size+col] *= mat2[row*size+col];
         }
     }
-    _mm_free(mat2);
     cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,size,1,size,
                 1.0f,mat1,size,dL,1,0.0f,dVec,1);
+    _mm_free(mat1);
+    _mm_free(vec1);
+    _mm_free(mat2);
+    _mm_free(vec2);
 }
 void VectorMatrixDotBW(real dA[],real gradient[], real B[],int row,int col,float alpha){
     for(int i=0;i<row;i++){
@@ -1416,7 +1419,6 @@ void Train_CBOWBasedNS() {
         real *dExp_att;
         real *dInput_ss;
         if(model_type==3){
-
             Q_word = (real *) _mm_malloc(hidden_size*sizeof(real),64);
             K_substring = (real *) _mm_malloc( MAX_SUBSTRING * hidden_size* sizeof(real),64);
             V_substring = (real *) _mm_malloc(MAX_SUBSTRING*hidden_size*sizeof(real),64);
@@ -1679,25 +1681,10 @@ void Train_CBOWBasedNS() {
                         for( int i = 0; i < ss_size+1; i++){
                             exp_att[i] /= su;
                         }
-//                        for(int k = 0; k < ss_size+1;k++){
-//                            printf("%f\t", exp_att[k]);
-//                        }
-//                        printf("\n");
                         // weight * v_ss -> 1*100
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,1,hidden_size,ss_size+1,
                                 1.0f,exp_att,ss_size+1,V_substring,hidden_size,1.0f,cbowM,hidden_size);
-//                        for(int k = 0; k < hidden_size;k++){
-//                            if(cbowM[k]>3)
-//                                printf("%f\t", cbowM[k]);
-//                        }
-//                        printf("\n");
-//                        for(int c = 0; c<hidden_size;c++){
-//                            for(int k = 0; k < ss_size+1;k++){
-//                                printf("%f\t", V_substring[c+k*hidden_size]);
-//                            }
-//                            printf("\n");
-//                        }
-//                        printf("\n");
+
                     }
 
                 }
@@ -1749,7 +1736,6 @@ void Train_CBOWBasedNS() {
                     if(model_type==2){
                         double sum_a = 0.0;
                         for(int d = 0;d<hidden_size;d++){
-//                            sum_a += inputM[i*hidden_size+d] * cbowM[d];
                             for(int c = 0;c<vocab[inputs[i]].character_size;c++){
                                 sum_a-=(charv[d + vocab[inputs[i]].character[c] * hidden_size] * cbowM[d] ) / (vocab[inputs[i]].character_size);
                             }
@@ -1757,18 +1743,13 @@ void Train_CBOWBasedNS() {
                         if(sum_a > 10000000)
                             printf("%lld\n",sum_a);
                         WeightH[inputs[i]] += sum_a/hidden_size;
-//                        VectorAddBW(cbowM,hidden_size,neu1char,0,1.0f);
                         VectorAddAlphaBW(cbowM,hidden_size,inputM,i,WeightH,inputs[i]);
-//                        for(int c=0;c<vocab[inputs[i]].character_size;c++){
-//                            VectorAddAlphaBW(neu1char,hidden_size,charv,vocab[inputs[i]].character[c],WeightH,inputs[i]);
-//                        }
                         VectorAddBW(cbowM,hidden_size,Wih,inputs[i], weightM[i]);
                         for(int j = 0;j<vocab[inputs[i]].character_size;j++){
                             VectorAddBW(cbowM,hidden_size,charv,vocab[inputs[i]].character[j],(1.0f - weightM[i]) );
                         }
                     }
                     if(model_type == 3){
-                        //FIXME: fix all variable like Input_ss because of for loop
 
                         // Attention backward
                         int ss_size = vocab[inputs[i]].character_size;
@@ -1816,11 +1797,6 @@ void Train_CBOWBasedNS() {
                         cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,1,ss_size+1,hidden_size,
                                     0.1f, Q_word,hidden_size,K_substring,hidden_size,0.0f,exp_att,ss_size+1);
 
-//                        for(int k = 0; k < ss_size;k++){
-//                            printf("%f\t", exp_att[k]);
-//                        }
-//                        printf("\n");
-
 
                         //softmax(weights)
                         //softmax[i]= exp(value[i])/sum(exp(value))
@@ -1833,9 +1809,7 @@ void Train_CBOWBasedNS() {
                                 exp_att[j] = -MAX_EXP;
                             }
                         }
-//                        for(int k = 0; k < ss_size;k++){
-//                            printf("%f\t", exp_att[k]);
-//                        }
+
 //                        printf("\n");
                         for( int j = 0; j < ss_size+1; j++){
                             exp_att[j] = exp(exp_att[j]); // 10 is sqrt(hidden_size)
@@ -1913,20 +1887,6 @@ void Train_CBOWBasedNS() {
                         if(tmp){
                             printf("\n");
                         }
-
-                        //modify alpha
-
-//                        if(alpha < 0.000001){
-//                            alpha = 0.f;
-//                        }
-//                        for(int col = 0; col < hidden_size;col++){
-//
-//                            for(int k = 0; k < ss_size+1;k++){
-//                                printf("%f\t", V_substring[k*hidden_size+col]);
-//                            }
-//                            printf("\n");
-//                        }
-//                        printf("\n");
 
                         // weight dot -> dQ
                         // weight -> dK_substring
@@ -2007,24 +1967,19 @@ void Train_CBOWBasedNS() {
         _mm_free(outputM);
         _mm_free(outputMd);
         _mm_free(corrM);
-//        if(model_type==3){
-//            printf("mm_free3\n");
-//            _mm_free(Q_word);
-//            printf("mm_free3.1\n");
-//            _mm_free(K_substring);
-//            printf("mm_free3.2\n");
-//            _mm_free(V_substring);
-//            _mm_free(exp_att);
-//            _mm_free(Input_ss);
-//            _mm_free(dSoftmax);
-//            _mm_free(dV_ss);
-//            _mm_free(dK_substring);
-//            _mm_free(dQ_word);
-//            _mm_free(dExp_att);
-//            _mm_free(dInput_ss);
-////            _mm_free()
-//            printf("mm_free4\n");
-//        }
+        if(model_type==3){
+            _mm_free(Q_word);
+            _mm_free(K_substring);
+            _mm_free(V_substring);
+            _mm_free(exp_att);
+            _mm_free(Input_ss);
+            _mm_free(dSoftmax);
+            _mm_free(dV_ss);
+            _mm_free(dK_substring);
+            _mm_free(dQ_word);
+            _mm_free(dExp_att);
+            _mm_free(dInput_ss);
+        }
         if (disk) {
             fclose(fin);
         } else {
